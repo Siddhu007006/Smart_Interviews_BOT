@@ -1,0 +1,46 @@
+2026-09-10 15:55:49 - __main__ - INFO - Hive Automation Bot - Phase 1
+2026-09-10 15:55:49 - __main__ - INFO - Starting with arguments: Namespace(config=None, headless=False, dry_run=False, log_level='DEBUG')
+2026-09-10 15:55:49 - src.utils.logging_config - DEBUG - Entering: Main
+2026-09-10 15:55:49 - __main__ - INFO - Loading configuration...
+2026-09-10 15:55:49 - src.utils.config - DEBUG - Loaded default config from D:\bot\config\default_config.yaml
+2026-09-10 15:55:49 - src.utils.config - WARNING - No AI provider configured. Set one of: OPENAI_API_KEY, GEMINI_API_KEY, GROQ_API_KEY
+2026-09-10 15:55:49 - __main__ - INFO - Initializing bot...
+2026-09-10 15:55:49 - src.state.manager - DEBUG - StateManager initialized with file: C:\Users\Satya\.hive_bot\state.json
+2026-09-10 15:55:49 - src.utils.logging_config - DEBUG - Entering: Loading persisted state
+2026-09-10 15:55:49 - src.state.manager - DEBUG - No existing state file: C:\Users\Satya\.hive_bot\state.json
+2026-09-10 15:55:49 - src.utils.logging_config - DEBUG - Completed: Loading persisted state
+2026-09-10 15:55:49 - src.bot - INFO - HiveBot initialized
+2026-09-10 15:55:49 - __main__ - INFO - Running Phase 1 workflow...
+2026-09-10 15:55:49 - src.utils.logging_config - DEBUG - Entering: Phase 1 Workflow
+2026-09-10 15:55:49 - src.bot - INFO - Starting Phase 1 workflow...
+2026-09-10 15:55:49 - src.utils.logging_config - DEBUG - Entering: Step 1: Launch Browser
+2026-09-10 15:55:49 - src.browser.manager - DEBUG - BrowserManager initialized with profile: ~\.hive_bot_profile, headless: False
+2026-09-10 15:55:49 - src.utils.logging_config - DEBUG - Entering: Launching browser
+2026-09-10 15:55:49 - src.browser.manager - DEBUG - Playwright started
+2026-09-10 15:55:49 - src.browser.manager - ERROR - Failed to launch browser: BrowserType.launch: Pass user_data_dir parameter to 'browser_type.launch_persistent_context(user_data_dir, **kwargs)' instead of specifying '--user-data-dir' argument
+2026-09-10 15:55:49 - src.utils.logging_config - ERROR - Error in Launching browser: Browser launch failed: BrowserType.launch: Pass user_data_dir parameter to 'browser_type.launch_persistent_context(user_data_dir, **kwargs)' instead of specifying '--user-data-dir' argument
+2026-09-10 15:55:49 - src.bot - ERROR - Browser launch failed: Browser launch failed: BrowserType.launch: Pass user_data_dir parameter to 'browser_type.launch_persistent_context(user_data_dir, **kwargs)' instead of specifying '--user-data-dir' argument
+2026-09-10 15:55:49 - src.utils.logging_config - ERROR - Error in Step 1: Launch Browser: Failed to launch browser: Browser launch failed: BrowserType.launch: Pass user_data_dir parameter to 'browser_type.launch_persistent_context(user_data_dir, **kwargs)' instead of specifying '--user-data-dir' argument
+2026-09-10 15:55:49 - src.bot - ERROR - Phase 1 workflow failed: Failed to launch browser: Browser launch failed: BrowserType.launch: Pass user_data_dir parameter to 'browser_type.launch_persistent_context(user_data_dir, **kwargs)' instead of specifying '--user-data-dir' argument
+2026-09-10 15:55:49 - src.utils.logging_config - DEBUG - Entering: Shutdown
+2026-09-10 15:55:49 - src.bot - INFO - Shutting down bot...
+2026-09-10 15:55:49 - src.utils.logging_config - DEBUG - Entering: Closing browser
+2026-09-10 15:55:49 - src.browser.manager - DEBUG - Playwright stopped
+2026-09-10 15:55:49 - src.browser.manager - INFO - Browser closed successfully
+2026-09-10 15:55:49 - src.utils.logging_config - DEBUG - Completed: Closing browser
+2026-09-10 15:55:49 - src.utils.logging_config - DEBUG - Entering: Saving bot state
+2026-09-10 15:55:49 - src.state.manager - DEBUG - State saved to C:\Users\Satya\.hive_bot\state.json
+2026-09-10 15:55:49 - src.utils.logging_config - DEBUG - Completed: Saving bot state
+2026-09-10 15:55:49 - src.utils.logging_config - DEBUG - Completed: Shutdown
+2026-09-10 15:55:49 - src.utils.logging_config - ERROR - Error in Phase 1 Workflow: Failed to launch browser: Browser launch failed: BrowserType.launch: Pass user_data_dir parameter to 'browser_type.launch_persistent_context(user_data_dir, **kwargs)' instead of specifying '--user-data-dir' argument
+2026-09-10 15:55:49 - src.utils.logging_config - DEBUG - Entering: Shutdown
+2026-09-10 15:55:49 - src.bot - INFO - Shutting down bot...
+2026-09-10 15:55:49 - src.utils.logging_config - DEBUG - Entering: Closing browser
+2026-09-10 15:55:49 - src.browser.manager - INFO - Browser closed successfully
+2026-09-10 15:55:49 - src.utils.logging_config - DEBUG - Completed: Closing browser
+2026-09-10 15:55:49 - src.utils.logging_config - DEBUG - Entering: Saving bot state
+2026-09-10 15:55:49 - src.state.manager - DEBUG - State saved to C:\Users\Satya\.hive_bot\state.json
+2026-09-10 15:55:49 - src.utils.logging_config - DEBUG - Completed: Saving bot state
+2026-09-10 15:55:49 - src.utils.logging_config - DEBUG - Completed: Shutdown
+2026-09-10 15:55:49 - src.utils.logging_config - ERROR - Error in Main: Failed to launch browser: Browser launch failed: BrowserType.launch: Pass user_data_dir parameter to 'browser_type.launch_persistent_context(user_data_dir, **kwargs)' instead of specifying '--user-data-dir' argument
+2026-09-10 15:55:49 - __main__ - ERROR - Bot error: Failed to launch browser: Browser launch failed: BrowserType.launch: Pass user_data_dir parameter to 'browser_type.launch_persistent_context(user_data_dir, **kwargs)' instead of specifying '--user-data-dir' argument

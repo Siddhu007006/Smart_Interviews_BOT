@@ -1,0 +1,62 @@
+# Default configuration for Hive Automation Bot
+# Override with ~/.hive_bot/config.yaml or environment variables
+
+browser:
+  # Browser launch mode
+  headless: false
+  
+  # Chrome user profile path (for persistent login)
+  browser_profile_path: ~/.hive_bot_profile
+  
+  # Default timeout for browser operations (milliseconds)
+  timeout_default_ms: 30000
+
+auth:
+  # Login timeout (seconds)
+  login_timeout_s: 60
+  
+  # Credentials loaded from environment variables:
+  # HIVE_LOGIN_URL, HIVE_USERNAME, HIVE_PASSWORD
+
+hive:
+  # Hive platform configuration
+  # URL patterns are loaded from environment
+  login_url_env: HIVE_LOGIN_URL
+
+state:
+  # State persistence configuration
+  persistence_file: ~/.hive_bot/state.json
+  
+  # Auto-save on state changes
+  auto_checkpoint: true
+
+logging:
+  # Logging configuration
+  level: INFO
+  
+  # Log file path
+  log_file: logs/hive_bot.log
+  
+  # Max log file size before rotation (MB)
+  max_log_size_mb: 100
+  
+  # Number of backup log files to keep
+  backup_count: 3
+
+features:
+  # Feature flags
+  dry_run: false
+
+ai_providers:
+  # AI provider configuration (loaded from environment)
+  # Set via environment variables:
+  # - OPENAI_API_KEY for OpenAI
+  # - GEMINI_API_KEY for Gemini
+  # - GROQ_API_KEY for Groq
+  
+  # Provider priority/fallback chain is configured here
+  # Default: ["groq", "openai", "gemini"]
+  enabled_providers:
+    - groq
+    - openai
+    - gemini
