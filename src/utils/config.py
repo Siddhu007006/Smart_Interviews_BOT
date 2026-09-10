@@ -12,6 +12,7 @@ import yaml
 from pathlib import Path
 from typing import Any, Dict, Optional
 import logging
+from dotenv import load_dotenv
 
 from .constants import CONFIG_DIR, HIVE_BOT_HOME
 from .errors import ConfigError
@@ -42,6 +43,15 @@ class ConfigManager:
 
     def _load_config(self) -> None:
         """Load configuration from all sources in priority order."""
+        # Step 0: Load .env file into os.environ so that _load_env_vars() can read them.
+        # override=False means real environment variables always win over .env values.
+        dotenv_path = Path.cwd() / ".env"
+        if dotenv_path.exists():
+            load_dotenv(dotenv_path=dotenv_path, override=False)
+            self.logger.debug(f"Loaded .env from {dotenv_path}")
+        else:
+            self.logger.debug(".env not found in CWD — relying on real env vars")
+
         # Start with default config
         default_config_path = CONFIG_DIR / "default_config.yaml"
         if default_config_path.exists():

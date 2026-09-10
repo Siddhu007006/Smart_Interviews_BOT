@@ -21,7 +21,7 @@ Design notes:
 
 import asyncio
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from playwright.async_api import (
     async_playwright,
@@ -49,6 +49,7 @@ class BrowserManager:
         profile_path: str,
         headless: bool = False,
         timeout_ms: int = 30000,
+        extra_args: Optional[List[str]] = None,
     ):
         """
         Initialize BrowserManager.
@@ -60,10 +61,16 @@ class BrowserManager:
                       NOTE: Chrome extensions are disabled in headless mode.
                       Set headless=False when the Hive Extension Detector is required.
             timeout_ms: Default timeout for browser operations in milliseconds.
+            extra_args: Additional Chrome CLI arguments to pass at launch.
+                        Used during first-run extension installation to pass
+                        --load-extension and --disable-extensions-except flags.
+                        Leave None for all normal bot runs (extension loads
+                        automatically from the persistent profile).
         """
         self.profile_path = Path(profile_path).expanduser().resolve()
         self.headless = headless
         self.timeout_ms = timeout_ms
+        self.extra_args: List[str] = extra_args or []
 
         # With launch_persistent_context the 'context' is returned directly —
         # there is no separate Browser object in the Playwright API.
@@ -109,12 +116,26 @@ class BrowserManager:
                 #   - persistent cookies/session
                 #   - Chrome extension support
                 #   - user-data-dir retention
-                self.context = await self.playwright.chromium.launch_persistent_context(
+                #
+                # IMPORTANT: Playwright adds --disable-extensions to Chrome by default.
+                # We must remove it via ignore_default_args so that extensions
+                # installed in the persistent profile (including the Hive Extension
+                # Detector we injected) are actually loaded and their content
+                # scripts execute on Hive pages.
+                launch_kwargs = dict(
                     user_data_dir=str(self.profile_path),
                     channel="chrome",       # Use installed Google Chrome binary
                     headless=self.headless,
+                    ignore_default_args=["--disable-extensions"],
+                )
+                if self.extra_args:
+                    launch_kwargs["args"] = self.extra_args
+                    logger.debug(f"Extra Chrome args: {self.extra_args}")
+                self.context = await self.playwright.chromium.launch_persistent_context(
+                    **launch_kwargs
                 )
                 self.context.set_default_timeout(self.timeout_ms)
+
 
                 logger.info(
                     f"✓ Chrome launched with persistent profile: {self.profile_path}"

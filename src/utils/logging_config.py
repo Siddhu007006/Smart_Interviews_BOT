@@ -10,6 +10,8 @@ Provides:
 
 import logging
 import logging.handlers
+import sys
+import io
 from pathlib import Path
 from contextvars import ContextVar
 from typing import Optional, Dict, Any
@@ -51,8 +53,16 @@ def setup_logging(
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 
-    # Console handler (INFO level)
-    console_handler = logging.StreamHandler()
+    # Console handler — ensure UTF-8 encoding so Unicode chars (e.g. ✓) render
+    # correctly on Windows regardless of the active code page (cp1252, etc.).
+    # reconfigure() is the safe way in Python 3.7+ and works whether stdout is
+    # a real file, a pipe, or a shell-owned stream.
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass  # Non-critical: fallback to default encoding
+    console_handler = logging.StreamHandler(stream=sys.stdout)
     console_handler.setLevel(level.upper())
     console_handler.setFormatter(detailed_formatter)
     root_logger.addHandler(console_handler)
@@ -63,7 +73,8 @@ def setup_logging(
         file_handler = logging.handlers.RotatingFileHandler(
             log_file,
             maxBytes=max_bytes,
-            backupCount=backup_count
+            backupCount=backup_count,
+            encoding="utf-8",
         )
         file_handler.setLevel(logging.DEBUG)  # File gets everything
         file_handler.setFormatter(detailed_formatter)

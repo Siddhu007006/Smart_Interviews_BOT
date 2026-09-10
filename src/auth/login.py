@@ -66,38 +66,57 @@ class AuthManager:
     async def fill_credentials(self) -> None:
         """
         Fill username and password fields.
-        
-        Uses observable page state and wait conditions to identify input fields.
-        Does NOT use hard-coded selectors.
-        
+
+        Uses character-by-character typing so Angular's reactive form model
+        receives real keyboard events and updates its internal state.
+        Playwright's fill() sets the DOM value directly without triggering
+        Angular's (input)/(change) event handlers, leaving the form model empty.
+
         Raises:
             AuthenticationError: If credential fields cannot be found or filled
         """
         with LogContext("Filling login credentials"):
             try:
-                # Wait for page to be interactive
-                await self.page.wait_for_load_state("networkidle", timeout=self.timeout_s * 1000)
-                logger.debug("Page is interactive")
+                # Wait for Angular to render the login form.
+                # domcontentloaded fires once the HTML shell is parsed; we then
+                # wait for an actual input element to be visible on screen.
+                await self.page.wait_for_load_state("domcontentloaded", timeout=self.timeout_s * 1000)
 
-                # Find username field - look for common input types
+                # Wait for first visible text/email input (Angular form rendered)
+                await self.page.wait_for_selector(
+                    "input[type='email'], input[type='text'], input[type='username']",
+                    state="visible",
+                    timeout=self.timeout_s * 1000,
+                )
+                logger.debug("Login form is visible")
+
+                # --- USERNAME ---
                 logger.info("Looking for username input field...")
-                username_fields = await self.page.query_selector_all(
+                username_field = await self.page.query_selector(
                     "input[type='email'], input[type='text'], input[name*='user'], input[name*='email']"
                 )
 
-                if not username_fields:
+                if not username_field:
                     raise AuthenticationError(
                         "Could not locate username input field. "
                         "Verify login page structure matches expected format."
                     )
 
-                # Use first email/text input as username
-                username_field = username_fields[0]
-                await username_field.fill(self.credentials.username)
+                # Click to focus, then type char-by-char so Angular's synthetic
+                # event system registers each keystroke and updates the form model.
+                await username_field.click()
+                await username_field.type(self.credentials.username, delay=40)
+                # Tab to blur the field — Angular marks it as 'touched' and may
+                # reveal the password field if it was conditionally hidden.
+                await self.page.keyboard.press("Tab")
+                await asyncio.sleep(0.3)
                 logger.debug("✓ Username entered")
 
-                # Find password field
+                # --- PASSWORD ---
                 logger.info("Looking for password input field...")
+                await self.page.wait_for_selector(
+                    "input[type='password']", state="visible", timeout=10000
+                )
                 password_field = await self.page.query_selector("input[type='password']")
 
                 if not password_field:
@@ -106,7 +125,9 @@ class AuthManager:
                         "Verify login page structure matches expected format."
                     )
 
-                await password_field.fill(self.credentials.password)
+                await password_field.click()
+                await password_field.type(self.credentials.password, delay=40)
+                await asyncio.sleep(0.2)
                 logger.debug("✓ Password entered")
 
             except AuthenticationError:
@@ -115,13 +136,14 @@ class AuthManager:
                 logger.error(f"Failed to fill credentials: {e}")
                 raise AuthenticationError(f"Failed to fill login credentials: {e}") from e
 
+
     async def submit_login(self) -> None:
         """
-        Submit login form.
-        
-        Finds and clicks the login button using observable page state.
-        Does NOT use hard-coded selectors.
-        
+        Submit the Angular login form.
+
+        The Hive Login button is a standard button without type='submit'.
+        We use text-based selectors first to reliably find the visible button.
+
         Raises:
             AuthenticationError: If login button cannot be found or clicked
         """
@@ -129,15 +151,30 @@ class AuthManager:
             try:
                 logger.info("Looking for login submit button...")
 
-                # Find submit button - look for common button patterns
-                submit_button = await self.page.query_selector(
-                    "button:has-text('Log'), button:has-text('Sign'), "
-                    "button:has-text('Login'), button:has-text('Submit')"
-                )
+                # Hive login button has text "Login" — prioritise text-based
+                # selectors to avoid matching hidden/disabled sibling elements.
+                button_selectors = [
+                    "button:has-text('Login')",
+                    "button:has-text('Log In')",
+                    "button:has-text('Sign In')",
+                    "button:has-text('Sign in')",
+                    "button:has-text('Submit')",
+                    "button[type='submit']",
+                    "input[type='submit']",
+                ]
 
-                if not submit_button:
-                    # Fallback: look for any button in form
-                    submit_button = await self.page.query_selector("button[type='submit']")
+                submit_button = None
+                for selector in button_selectors:
+                    # Use page.locator() so we can filter to visible only
+                    locator = self.page.locator(selector).first
+                    try:
+                        # Wait up to 3s for it to appear
+                        await locator.wait_for(state="visible", timeout=3000)
+                        submit_button = locator
+                        logger.debug(f"Found visible submit button via: {selector}")
+                        break
+                    except Exception:
+                        continue
 
                 if not submit_button:
                     raise AuthenticationError(
@@ -145,9 +182,21 @@ class AuthManager:
                         "Verify login page structure matches expected format."
                     )
 
+                # Wait up to 5s for button to become enabled (Angular validation)
+                for attempt in range(10):
+                    is_disabled = await submit_button.get_attribute("disabled")
+                    aria_disabled = await submit_button.get_attribute("aria-disabled")
+                    if is_disabled is None and aria_disabled not in ("true", ""):
+                        break
+                    logger.debug(
+                        f"Submit button disabled (attempt {attempt+1}/10) — "
+                        "waiting for Angular form validation..."
+                    )
+                    await asyncio.sleep(0.5)
+
                 logger.info("Clicking login submit button...")
                 await submit_button.click()
-                logger.debug("✓ Login submitted")
+                logger.debug("Login submitted")
 
             except AuthenticationError:
                 raise
@@ -155,15 +204,18 @@ class AuthManager:
                 logger.error(f"Failed to submit login: {e}")
                 raise AuthenticationError(f"Failed to submit login form: {e}") from e
 
+
+
+
     async def wait_for_authentication(self) -> None:
         """
         Wait for successful authentication.
-        
-        Waits for observable indicators of successful login:
-        - Page URL change (redirect to dashboard/problem list)
-        - Presence of authenticated UI elements
-        - Absence of error messages
-        
+
+        Hive is a SPA that uses client-side routing (pushState) after login.
+        We poll the page URL until it leaves the /login path. Also checks for
+        visible error messages on the page during polling so we can fail fast
+        instead of waiting the full timeout on wrong credentials.
+
         Raises:
             AuthenticationError: If authentication fails or times out
         """
@@ -171,38 +223,78 @@ class AuthManager:
             try:
                 logger.info("Waiting for authentication to complete...")
 
-                # Wait for URL change (indicates redirect from login page)
-                await self.page.wait_for_url(
-                    lambda url: self.credentials.login_url not in str(url),
-                    timeout=self.timeout_s * 1000,
-                )
-                logger.info("✓ Redirected from login page")
+                from urllib.parse import urlparse
 
-                # Wait for page to stabilize
-                await self.page.wait_for_load_state("networkidle", timeout=self.timeout_s * 1000)
-                logger.debug("Page loaded")
+                login_path = urlparse(self.credentials.login_url).path.rstrip("/")
+                deadline_s = self.timeout_s
+                poll_interval_s = 0.5
+                elapsed = 0.0
 
-                # Check for error messages
-                error_elements = await self.page.query_selector_all(
-                    "[class*='error'], [class*='danger'], [role='alert']"
-                )
+                while elapsed < deadline_s:
+                    current_url = self.page.url
+                    if current_url not in ("about:blank", ""):
+                        current_path = urlparse(current_url).path.rstrip("/")
+                        if current_path != login_path:
+                            logger.info(f"Redirected from login → {current_url}")
+                            break
 
-                for error_elem in error_elements:
-                    error_text = await error_elem.text_content()
-                    if error_text and error_text.strip():
-                        raise AuthenticationError(f"Login error: {error_text.strip()}")
+                    # Check for error messages on the page every 2s
+                    if elapsed > 0 and elapsed % 2.0 < poll_interval_s:
+                        try:
+                            body = await self.page.evaluate(
+                                "() => document.body.innerText"
+                            )
+                            body_lower = body.lower()
+                            failure_phrases = [
+                                "invalid credentials", "incorrect password",
+                                "user not found", "login failed",
+                                "authentication failed", "wrong password",
+                                "invalid username", "invalid password",
+                                "incorrect username", "account not found",
+                                "no account", "user does not exist",
+                            ]
+                            for phrase in failure_phrases:
+                                if phrase in body_lower:
+                                    raise AuthenticationError(
+                                        f"Login rejected: '{phrase}' visible on page. "
+                                        "Please verify credentials in .env"
+                                    )
+                        except AuthenticationError:
+                            raise
+                        except Exception:
+                            pass  # Page not readable yet — continue polling
+
+                    await asyncio.sleep(poll_interval_s)
+                    elapsed += poll_interval_s
+                else:
+                    # Timed out — try to capture any error message for context
+                    error_hint = ""
+                    try:
+                        body = await self.page.evaluate("() => document.body.innerText")
+                        lines = [l.strip() for l in body.split("\n") if l.strip()]
+                        error_hint = f" Page text: {' | '.join(lines[:5])}"
+                    except Exception:
+                        pass
+                    raise AuthenticationError(
+                        f"Login timeout after {deadline_s}s — URL never left /login."
+                        f"{error_hint}\n"
+                        "Check credentials in .env and Hive availability."
+                    )
+
+                # Brief settle for JS-rendered post-login content
+                await asyncio.sleep(1.5)
 
                 self.is_authenticated = True
-                logger.info("✓ Authentication successful")
+                logger.info("Authentication successful")
 
-            except TimeoutError as e:
-                logger.error(f"Authentication timeout: {e}")
-                raise AuthenticationError(f"Login timeout after {self.timeout_s}s") from e
             except AuthenticationError:
                 raise
             except Exception as e:
                 logger.error(f"Authentication failed: {e}")
                 raise AuthenticationError(f"Authentication verification failed: {e}") from e
+
+
+
 
     async def verify_session(self) -> bool:
         """
