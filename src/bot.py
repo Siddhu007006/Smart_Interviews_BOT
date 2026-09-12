@@ -430,6 +430,19 @@ class HiveBot:
                 MAX_PAGES = 50  # Safety cap
                 page_number = 0
 
+                # ── CRITICAL: always start from page 1 ──────────────────────────
+                # After click_continue_contest() the Angular SPA can restore the
+                # last page the browser was on (e.g. page 3).  We must hard-navigate
+                # to the /problems URL so the paginator is reset to page 1.
+                logger.info("[Solve Phase] Resetting to page 1 before solve loop...")
+                reset_ok = await detector.go_to_first_page(contest_url=contest_url)
+                if not reset_ok:
+                    logger.warning(
+                        "[Solve Phase] go_to_first_page() returned False — "
+                        "proceeding anyway but order may be wrong."
+                    )
+                # ────────────────────────────────────────────────────────────────
+
                 while page_number < MAX_PAGES:
                     if self._shutdown_requested:
                         logger.info("Shutdown requested: stopping solve loop.")

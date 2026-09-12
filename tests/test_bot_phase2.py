@@ -61,6 +61,7 @@ async def test_problem_classification_in_discovery(mock_bot):
          patch.object(mock_bot, "solve_problem", new_callable=AsyncMock) as mock_solve:
         detector = mock_detector_cls.return_value
         detector.is_on_problem_list_page = AsyncMock(return_value=True)
+        detector.go_to_first_page = AsyncMock(return_value=True)
         detector.fetch_problems = AsyncMock(return_value=mock_problems)
         detector.go_to_next_page = AsyncMock(return_value=False)
         detector.navigate_to_contest = AsyncMock(return_value=True)
@@ -133,6 +134,7 @@ async def test_dom_order_top_to_bottom(mock_bot):
          patch.object(mock_bot, "solve_problem", new_callable=AsyncMock, side_effect=track_solve):
         detector = mock_detector_cls.return_value
         detector.is_on_problem_list_page = AsyncMock(return_value=True)
+        detector.go_to_first_page = AsyncMock(return_value=True)
         detector.fetch_problems = AsyncMock(return_value=mock_problems)
         detector.go_to_next_page = AsyncMock(return_value=False)
         detector.navigate_to_contest = AsyncMock(return_value=True)

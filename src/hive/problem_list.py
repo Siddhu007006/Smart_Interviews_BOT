@@ -504,7 +504,57 @@ class ProblemListDetector:
                 logger.error(f"Failed to navigate to problem: {e}")
                 return False
 
+    async def go_to_first_page(self, contest_url: Optional[str] = None) -> bool:
+        """
+        Navigate to page 1 of the problem list unconditionally.
+
+        Strategy (two-step fallback):
+          1. If contest_url is provided, navigate directly to the /problems URL.
+             A fresh page.goto() to the problems URL always gives page 1 —
+             the Angular paginator is reset on hard navigation.
+          2. If no URL is available, try clicking the 'First page' button on the
+             Angular Material paginator.  If that button is absent (we are already
+             on page 1) this is a no-op and returns True.
+
+        This MUST be called immediately before the solve loop to guarantee that
+        the bot starts from page 1 regardless of where the browser was left.
+
+        Returns:
+            True if browser is on page 1, False on failure.
+        """
+        try:
+            if contest_url:
+                # Build the /problems URL from the contest URL
+                problems_url = contest_url.rstrip("/")
+                if not problems_url.endswith("/problems"):
+                    problems_url = problems_url + "/problems"
+
+                logger.info(f"[go_to_first_page] Hard-navigating to {problems_url} (resets paginator to page 1)")
+                await self.page.goto(problems_url, wait_until="domcontentloaded", timeout=30000)
+                await asyncio.sleep(3.0)
+                logger.info(f"[go_to_first_page] ✓ Now on: {self.page.url}")
+                return True
+
+            # Fallback: try the Material paginator 'First page' button
+            first_btn = self.page.locator(
+                "button[aria-label='First page'], .mat-paginator-navigation-first"
+            )
+            if await first_btn.count() > 0 and await first_btn.first.is_enabled():
+                logger.info("[go_to_first_page] Clicking 'First page' paginator button")
+                await first_btn.first.click()
+                await asyncio.sleep(2.0)
+                return True
+
+            # Already on page 1 (no first-page button = paginator is at the start)
+            logger.info("[go_to_first_page] No 'First page' button — already on page 1")
+            return True
+
+        except Exception as e:
+            logger.error(f"[go_to_first_page] Failed: {e}")
+            return False
+
     async def has_next_page(self) -> bool:
+
         """Check if paginator has a next page available."""
         try:
             next_btn = self.page.locator(NEXT_PAGE_BUTTON)
