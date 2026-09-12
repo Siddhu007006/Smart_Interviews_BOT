@@ -486,6 +486,29 @@ class HiveBot:
                             f"\n[Page {page_number + 1}, #{pos}/{len(unsolved_list)}] "
                             f"{problem.problem_id} ({kind})"
                         )
+
+                        # ── State drift correction ────────────────────────────────
+                        # Hive's DOM is authoritative.  If the DOM shows an unsolved
+                        # button (Solve / Continue) but state.json says this problem
+                        # is already completed, state.json is WRONG — the previous
+                        # run must have crashed after marking it complete but before
+                        # Hive actually accepted the submission.  Clear the stale
+                        # entry so solve_problem() will attempt it again.
+                        if problem.problem_id in self.state_manager.state.completed_problems:
+                            logger.warning(
+                                f"[State drift] '{problem.problem_id}' is in completed_problems "
+                                f"but Hive DOM shows '{problem.action_button_text}' (unsolved). "
+                                f"Removing from completed_problems — DOM is authoritative."
+                            )
+                            self.state_manager.state.completed_problems.remove(
+                                problem.problem_id
+                            )
+                            # Also clear progress so attempt counter resets
+                            if problem.problem_id in self.state_manager.state.progress:
+                                del self.state_manager.state.progress[problem.problem_id]
+                            self.state_manager.save_state()
+                        # ─────────────────────────────────────────────────────────
+
                         total_attempted_this_run += 1
                         try:
                             result = await self.solve_problem(
@@ -497,6 +520,7 @@ class HiveBot:
                         except Exception as e:
                             logger.error(f"Error solving '{problem.problem_id}': {e}")
                             self.state_manager.save_state()
+
 
                     if self._shutdown_requested:
                         break
