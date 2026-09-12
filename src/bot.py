@@ -525,6 +525,30 @@ class HiveBot:
                     if self._shutdown_requested:
                         break
 
+                    # ── Return to problem list before paginating ─────────────────
+                    # solve_problem() navigates to the problem DETAIL page.
+                    # If we call go_to_next_page() while on a detail page, the
+                    # "Next" button navigates to the *next problem*, not the next
+                    # LIST page — so we get 0 problems and terminate early.
+                    # Fix: hard-navigate back to the problem list at the current
+                    # page index before calling go_to_next_page().
+                    current_list_url = (
+                        f"{contest_url}/problems?page={page_number}&pageSize=10"
+                    )
+                    page_obj = await self.browser_manager.get_page()
+                    if "/problems/" in page_obj.url:
+                        logger.info(
+                            f"[Page {page_number + 1}] Returning to problem list "
+                            f"before paginating (was on detail page)..."
+                        )
+                        await page_obj.goto(
+                            current_list_url,
+                            wait_until="domcontentloaded",
+                            timeout=30000,
+                        )
+                        await asyncio.sleep(2.5)
+                    # ────────────────────────────────────────────────────────────
+
                     # Advance to next page
                     advanced = await detector.go_to_next_page()
                     if not advanced:
