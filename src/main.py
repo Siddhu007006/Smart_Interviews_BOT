@@ -13,6 +13,7 @@ Options:
 
 import asyncio
 import argparse
+import signal
 import sys
 from pathlib import Path
 
@@ -100,15 +101,38 @@ async def main():
             # Create and run bot
             logger.info("Initializing bot...")
             async with HiveBot(config_manager) as bot:
-                logger.info("Running Phase 1 workflow...")
-                success = await bot.run(dry_run=args.dry_run)
+                # Install graceful signal handlers
+                def _handle_signal(sig, frame):
+                    try:
+                        signame = signal.Signals(sig).name
+                    except Exception:
+                        signame = str(sig)
+                    bot.request_shutdown(signame)
 
-                if success:
-                    logger.info("✓ Phase 1 completed successfully!")
-                    return 0
-                else:
-                    logger.error("Phase 1 failed")
-                    return 1
+                original_sigint = signal.getsignal(signal.SIGINT)
+                original_sigterm = signal.getsignal(signal.SIGTERM)
+                signal.signal(signal.SIGINT, _handle_signal)
+                signal.signal(signal.SIGTERM, _handle_signal)
+                has_break = hasattr(signal, "SIGBREAK")
+                if has_break:
+                    original_sigbreak = signal.getsignal(signal.SIGBREAK)
+                    signal.signal(signal.SIGBREAK, _handle_signal)
+
+                try:
+                    logger.info("Running Bot workflow...")
+                    success = await bot.run(dry_run=args.dry_run)
+
+                    if success:
+                        logger.info("✓ Bot workflow completed successfully!")
+                        return 0
+                    else:
+                        logger.error("Bot workflow failed")
+                        return 1
+                finally:
+                    signal.signal(signal.SIGINT, original_sigint)
+                    signal.signal(signal.SIGTERM, original_sigterm)
+                    if has_break:
+                        signal.signal(signal.SIGBREAK, original_sigbreak)
 
     except KeyboardInterrupt:
         logger.warning("Bot interrupted by user")

@@ -3,13 +3,14 @@ Tests for browser management.
 
 Tests:
 - Browser initialization
-- Browser launch/close
-- Context creation
+- Browser launch/close with persistent context
+- Context creation and timeouts
 - Page management
 """
 
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
+from pathlib import Path
 
 from src.browser import BrowserManager
 from src.utils import BrowserError
@@ -27,30 +28,27 @@ class TestBrowserManager:
             timeout_ms=30000,
         )
 
-        assert manager.profile_path == temp_dir / "profile"
-        assert manager.headless == False
+        assert manager.profile_path == (temp_dir / "profile").resolve()
+        assert manager.headless is False
         assert manager.timeout_ms == 30000
-        assert manager.browser is None
         assert manager.context is None
 
     @pytest.mark.asyncio
     async def test_browser_launch(self, temp_dir, mock_playwright):
-        """Test browser launch"""
+        """Test browser launch with persistent context"""
         manager = BrowserManager(profile_path=str(temp_dir / "profile"))
 
         with patch('src.browser.manager.async_playwright') as mock_ap:
-            mock_ap.return_value.__aenter__ = AsyncMock(
-                return_value=mock_playwright
-            )
-            mock_ap.return_value.__aexit__ = AsyncMock(return_value=None)
-
-            mock_browser = AsyncMock()
-            mock_playwright.chromium.launch = AsyncMock(return_value=mock_browser)
+            mock_ap.return_value.start = AsyncMock(return_value=mock_playwright)
+            mock_context = AsyncMock()
+            mock_context.set_default_timeout = MagicMock()
+            mock_playwright.chromium.launch_persistent_context = AsyncMock(return_value=mock_context)
 
             await manager.launch_browser()
 
-            assert manager.browser is mock_browser
+            assert manager.context is mock_context
             assert manager.playwright is mock_playwright
+            mock_context.set_default_timeout.assert_called_once_with(30000)
 
     @pytest.mark.asyncio
     async def test_browser_launch_failure(self, temp_dir):
@@ -64,41 +62,20 @@ class TestBrowserManager:
                 await manager.launch_browser()
 
     @pytest.mark.asyncio
-    async def test_create_context(self, temp_dir, mock_browser):
-        """Test context creation"""
-        manager = BrowserManager(profile_path=str(temp_dir / "profile"))
-        manager.browser = mock_browser
-
-        mock_context = AsyncMock()
-        mock_browser.new_context = AsyncMock(return_value=mock_context)
-
-        await manager.create_context()
-
-        assert manager.context is mock_context
-        mock_context.set_default_timeout.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_create_context_without_browser(self, temp_dir):
-        """Test error when creating context without browser"""
-        manager = BrowserManager(profile_path=str(temp_dir / "profile"))
-
-        with pytest.raises(BrowserError):
-            await manager.create_context()
-
-    @pytest.mark.asyncio
     async def test_new_page(self, temp_dir):
         """Test creating new page"""
         manager = BrowserManager(profile_path=str(temp_dir / "profile"))
 
         mock_context = AsyncMock()
         mock_page = AsyncMock()
+        mock_page.set_default_timeout = MagicMock()
         mock_context.new_page = AsyncMock(return_value=mock_page)
         manager.context = mock_context
 
         page = await manager.new_page()
 
         assert page is mock_page
-        mock_page.set_default_timeout.assert_called_once()
+        mock_page.set_default_timeout.assert_called_once_with(manager.timeout_ms)
 
     @pytest.mark.asyncio
     async def test_get_page(self, temp_dir):
@@ -107,6 +84,7 @@ class TestBrowserManager:
 
         mock_context = AsyncMock()
         mock_page = AsyncMock()
+        mock_context.pages = []
         mock_context.new_page = AsyncMock(return_value=mock_page)
         manager.context = mock_context
 
@@ -125,35 +103,31 @@ class TestBrowserManager:
 
         mock_page = AsyncMock()
         mock_context = AsyncMock()
-        mock_browser = AsyncMock()
         mock_playwright = AsyncMock()
 
         manager.page = mock_page
         manager.context = mock_context
-        manager.browser = mock_browser
         manager.playwright = mock_playwright
 
         await manager.close()
 
-        mock_page.close.assert_called_once()
         mock_context.close.assert_called_once()
-        mock_browser.close.assert_called_once()
         mock_playwright.stop.assert_called_once()
 
         assert manager.page is None
         assert manager.context is None
-        assert manager.browser is None
         assert manager.playwright is None
 
     @pytest.mark.asyncio
-    async def test_is_connected_true(self, temp_dir, mock_browser):
+    async def test_is_connected_true(self, temp_dir):
         """Test connection check when connected"""
         manager = BrowserManager(profile_path=str(temp_dir / "profile"))
-        manager.browser = mock_browser
-        mock_browser.version = "120.0"
+        mock_context = AsyncMock()
+        mock_context.pages = [AsyncMock()]
+        manager.context = mock_context
 
         connected = await manager.is_connected()
-        assert connected == True
+        assert connected is True
 
     @pytest.mark.asyncio
     async def test_is_connected_false_no_browser(self, temp_dir):
@@ -161,7 +135,7 @@ class TestBrowserManager:
         manager = BrowserManager(profile_path=str(temp_dir / "profile"))
 
         connected = await manager.is_connected()
-        assert connected == False
+        assert connected is False
 
     @pytest.mark.asyncio
     async def test_context_manager(self, temp_dir, mock_playwright):
@@ -169,21 +143,60 @@ class TestBrowserManager:
         manager = BrowserManager(profile_path=str(temp_dir / "profile"))
 
         with patch('src.browser.manager.async_playwright') as mock_ap:
-            mock_ap.return_value.__aenter__ = AsyncMock(
-                return_value=mock_playwright
-            )
-            mock_ap.return_value.__aexit__ = AsyncMock(return_value=None)
-
-            mock_browser = AsyncMock()
+            mock_ap.return_value.start = AsyncMock(return_value=mock_playwright)
             mock_context = AsyncMock()
-            mock_playwright.chromium.launch = AsyncMock(return_value=mock_browser)
-            mock_browser.new_context = AsyncMock(return_value=mock_context)
+            mock_context.set_default_timeout = MagicMock()
+            mock_playwright.chromium.launch_persistent_context = AsyncMock(return_value=mock_context)
 
             async with manager as mgr:
                 assert mgr is manager
-                assert manager.browser is mock_browser
                 assert manager.context is mock_context
 
-            # Verify cleanup was called
             mock_context.close.assert_called_once()
-            mock_browser.close.assert_called_once()
+            mock_playwright.stop.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_browser_launch_channel_none_uses_chromium(self, temp_dir, mock_playwright):
+        """Test that channel=None does not pass channel to launch_persistent_context (Chromium default)"""
+        manager = BrowserManager(profile_path=str(temp_dir / "profile"), channel=None)
+
+        with patch('src.browser.manager.async_playwright') as mock_ap:
+            mock_ap.return_value.start = AsyncMock(return_value=mock_playwright)
+            mock_context = AsyncMock()
+            mock_context.set_default_timeout = MagicMock()
+            mock_playwright.chromium.launch_persistent_context = AsyncMock(return_value=mock_context)
+
+            await manager.launch_browser()
+
+            call_kwargs = mock_playwright.chromium.launch_persistent_context.call_args.kwargs
+            assert "channel" not in call_kwargs
+
+    @pytest.mark.asyncio
+    async def test_browser_launch_channel_chrome_passes_channel(self, temp_dir, mock_playwright):
+        """Test that channel='chrome' explicitly passes channel='chrome' to launch_persistent_context"""
+        manager = BrowserManager(profile_path=str(temp_dir / "profile"), channel="chrome")
+
+        with patch('src.browser.manager.async_playwright') as mock_ap:
+            mock_ap.return_value.start = AsyncMock(return_value=mock_playwright)
+            mock_context = AsyncMock()
+            mock_context.set_default_timeout = MagicMock()
+            mock_playwright.chromium.launch_persistent_context = AsyncMock(return_value=mock_context)
+
+            await manager.launch_browser()
+
+            call_kwargs = mock_playwright.chromium.launch_persistent_context.call_args.kwargs
+            assert call_kwargs.get("channel") == "chrome"
+
+    @pytest.mark.asyncio
+    async def test_get_runtime_info(self, temp_dir, mock_playwright):
+        """Test get_runtime_info method returns runtime dictionary"""
+        manager = BrowserManager(profile_path=str(temp_dir / "profile"), channel=None)
+        mock_playwright.chromium.executable_path = "C:/fake/path/chrome.exe"
+        manager.playwright = mock_playwright
+
+        info = await manager.get_runtime_info()
+        assert info["requested_channel"] is None
+        assert info["executable_path"] == "C:/fake/path/chrome.exe"
+        assert "user_agent" in info
+        assert "profile_path" in info
+

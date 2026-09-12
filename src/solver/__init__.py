@@ -1,11 +1,39 @@
 """
-AI code solving module (Phase 2+).
+AI Solver Module.
 
-Planned exports:
-- AISolver: Main solver orchestrator
-- BaseProvider: Provider base class
-- OpenAI, Gemini, Groq, Ollama: Provider implementations
-- PromptGenerator: Problem-to-prompt conversion
+Exports:
+- SolutionRequest, SolutionResponse
+- ProviderError, ProviderErrorKind
+- BaseAIProvider, GroqProvider, GeminiProvider
+- PromptBuilder
+- SolutionValidator
+- AISolverEngine
 """
 
-# Phase 2+: Implement AI solver pipeline
+from .models import (
+    SolutionRequest,
+    SolutionResponse,
+    ProviderError,
+    ProviderErrorKind,
+)
+from .provider import (
+    BaseAIProvider,
+    GroqProvider,
+    GeminiProvider,
+)
+from .prompt import PromptBuilder
+from .validator import SolutionValidator
+from .engine import AISolverEngine
+
+__all__ = [
+    "SolutionRequest",
+    "SolutionResponse",
+    "ProviderError",
+    "ProviderErrorKind",
+    "BaseAIProvider",
+    "GroqProvider",
+    "GeminiProvider",
+    "PromptBuilder",
+    "SolutionValidator",
+    "AISolverEngine",
+]

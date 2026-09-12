@@ -2,6 +2,9 @@
 # Override with ~/.hive_bot/config.yaml or environment variables
 
 browser:
+  # Browser channel: null = Playwright Chromium / Chrome for Testing, "chrome" = branded installed Chrome
+  channel: null
+
   # Browser launch mode
   headless: false
   
@@ -22,6 +25,7 @@ hive:
   # Hive platform configuration
   # URL patterns are loaded from environment
   login_url_env: HIVE_LOGIN_URL
+  contest_url_env: HIVE_CONTEST_URL
 
 state:
   # State persistence configuration
@@ -47,16 +51,25 @@ features:
   # Feature flags
   dry_run: false
 
+solver:
+  # Problem solving configuration
+  default_language: C++
+  max_attempts: 5
+  max_platform_retries: 3
+  run_timeout_seconds: 30.0
+  submit_timeout_seconds: 60.0
+  run_sample_tests: true
+
 ai_providers:
   # AI provider configuration (loaded from environment)
   # Set via environment variables:
-  # - OPENAI_API_KEY for OpenAI
-  # - GEMINI_API_KEY for Gemini
-  # - GROQ_API_KEY for Groq
+  # - GROQ_API_KEY, GROQ_MODEL for Groq (primary)
+  # - GEMINI_API_KEY, GEMINI_MODEL for Gemini (fallback 1)
+  # - OPENAI_API_KEY, OPENAI_MODEL for OpenAI (fallback 2)
+  # Note: Zero model IDs are hardcoded; model IDs must be supplied via config/.env.
   
-  # Provider priority/fallback chain is configured here
-  # Default: ["groq", "openai", "gemini"]
+  # Provider priority / fallback chain
   enabled_providers:
     - groq
-    - openai
     - gemini
+    - openai

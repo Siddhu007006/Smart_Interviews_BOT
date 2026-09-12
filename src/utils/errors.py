@@ -18,6 +18,12 @@ class DOMError(HiveBotError):
     pass
 
 
+class ProblemExtractionError(DOMError):
+    """Problem detail extraction error"""
+    pass
+
+
+
 class EditorError(HiveBotError):
     """Code editor interaction error"""
     pass
@@ -30,6 +36,11 @@ class SolverError(HiveBotError):
 
 class VerdictError(HiveBotError):
     """Verdict parsing error"""
+    pass
+
+
+class SubmissionError(HiveBotError):
+    """Submission execution error or safety guard violation"""
     pass
 
 

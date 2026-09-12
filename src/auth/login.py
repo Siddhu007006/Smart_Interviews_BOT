@@ -44,7 +44,7 @@ class AuthManager:
 
     async def navigate_to_login(self) -> None:
         """
-        Navigate to the login page.
+        Navigate to the login page (bounded 10s timeout).
         
         Raises:
             AuthenticationError: If navigation fails
@@ -55,7 +55,7 @@ class AuthManager:
                 await self.page.goto(
                     self.credentials.login_url,
                     wait_until="domcontentloaded",
-                    timeout=self.timeout_s * 1000,
+                    timeout=10000,  # Explicit bounded 10s timeout
                 )
                 logger.info("✓ Login page loaded")
 
@@ -65,12 +65,19 @@ class AuthManager:
 
     async def fill_credentials(self) -> None:
         """
-        Fill username and password fields.
+        Fill username and password fields intelligently.
+
+        Strategy:
+        1. Check what's currently in the form fields
+        2. If they match .env credentials → skip filling (just click login)
+        3. If they don't match or are empty → fill from .env
 
         Uses character-by-character typing so Angular's reactive form model
         receives real keyboard events and updates its internal state.
-        Playwright's fill() sets the DOM value directly without triggering
-        Angular's (input)/(change) event handlers, leaving the form model empty.
+
+        Selector priority (deterministic, ambiguity detection):
+        - Username: formcontrolname='username' → name='username' → scoped fallback
+        - Password: formcontrolname='password' → name='password' → scoped fallback
 
         Raises:
             AuthenticationError: If credential fields cannot be found or filled
@@ -78,28 +85,106 @@ class AuthManager:
         with LogContext("Filling login credentials"):
             try:
                 # Wait for Angular to render the login form.
-                # domcontentloaded fires once the HTML shell is parsed; we then
-                # wait for an actual input element to be visible on screen.
-                await self.page.wait_for_load_state("domcontentloaded", timeout=self.timeout_s * 1000)
+                await self.page.wait_for_load_state("domcontentloaded", timeout=10000)
 
-                # Wait for first visible text/email input (Angular form rendered)
+                # Wait for first visible input to confirm form is rendered
                 await self.page.wait_for_selector(
-                    "input[type='email'], input[type='text'], input[type='username']",
+                    "input[formcontrolname='username'], input[name='username'], input[type='email'], input[type='text']",
                     state="visible",
-                    timeout=self.timeout_s * 1000,
+                    timeout=10000,
                 )
                 logger.debug("Login form is visible")
 
+                # --- CHECK EXISTING CREDENTIALS ---
+                logger.info("Checking if form already has matching credentials...")
+                
+                # Find username field
+                username_selectors = [
+                    "input[formcontrolname='username']",
+                    "input[name='username']",
+                    "input[type='email']",
+                ]
+                
+                username_field = None
+                existing_username = None
+                for selector in username_selectors:
+                    candidates = await self.page.query_selector_all(selector)
+                    visible_candidates = []
+                    for cand in candidates:
+                        if await cand.is_visible():
+                            visible_candidates.append(cand)
+                    
+                    if len(visible_candidates) == 1:
+                        username_field = visible_candidates[0]
+                        existing_username = await username_field.input_value()
+                        logger.debug(f"Found username field: {selector}")
+                        break
+                
+                # Find password field
+                password_selectors = [
+                    "input[formcontrolname='password']",
+                    "input[name='password']",
+                    "input[type='password']",
+                ]
+                
+                password_field = None
+                existing_password = None
+                for selector in password_selectors:
+                    candidates = await self.page.query_selector_all(selector)
+                    visible_candidates = []
+                    for cand in candidates:
+                        if await cand.is_visible():
+                            visible_candidates.append(cand)
+                    
+                    if len(visible_candidates) == 1:
+                        password_field = visible_candidates[0]
+                        existing_password = await password_field.input_value()
+                        logger.debug(f"Found password field: {selector}")
+                        break
+
+                # Check if existing credentials match .env
+                env_username = self.credentials.username
+                env_password = self.credentials.password
+                
+                if (existing_username and existing_password and
+                    existing_username.strip() == env_username.strip() and
+                    existing_password.strip() == env_password.strip()):
+                    logger.info(f"✓ Form already has correct credentials for {env_username} - skipping fill, will click login")
+                    return  # Skip filling, will proceed to login click
+                
+                logger.info(f"Form credentials don't match .env ({existing_username} vs {env_username}) or are empty - filling from .env")
+
                 # --- USERNAME ---
-                logger.info("Looking for username input field...")
-                username_field = await self.page.query_selector(
-                    "input[type='email'], input[type='text'], input[name*='user'], input[name*='email']"
-                )
+                logger.info("Looking for username input field (deterministic hierarchy)...")
+                username_selectors = [
+                    "input[formcontrolname='username']",
+                    "input[name='username']",
+                    "input[type='email']",
+                ]
+                
+                username_field = None
+                for selector in username_selectors:
+                    candidates = await self.page.query_selector_all(selector)
+                    visible_candidates = []
+                    for cand in candidates:
+                        if await cand.is_visible():
+                            visible_candidates.append(cand)
+                    
+                    if len(visible_candidates) > 1:
+                        raise AuthenticationError(
+                            f"Ambiguous username selector '{selector}': found {len(visible_candidates)} visible matches. "
+                            f"Cannot safely select username input. Please verify login page structure."
+                        )
+                    elif len(visible_candidates) == 1:
+                        username_field = visible_candidates[0]
+                        logger.debug(f"✓ Found username field via: {selector}")
+                        break
 
                 if not username_field:
                     raise AuthenticationError(
                         "Could not locate username input field. "
-                        "Verify login page structure matches expected format."
+                        "Verify login page structure matches expected format. "
+                        f"Tried selectors: {username_selectors}"
                     )
 
                 # Click to focus, then type char-by-char so Angular's synthetic
@@ -113,16 +198,36 @@ class AuthManager:
                 logger.debug("✓ Username entered")
 
                 # --- PASSWORD ---
-                logger.info("Looking for password input field...")
-                await self.page.wait_for_selector(
-                    "input[type='password']", state="visible", timeout=10000
-                )
-                password_field = await self.page.query_selector("input[type='password']")
+                logger.info("Looking for password input field (deterministic hierarchy)...")
+                password_selectors = [
+                    "input[formcontrolname='password']",
+                    "input[name='password']",
+                    "input[type='password']",
+                ]
+                
+                password_field = None
+                for selector in password_selectors:
+                    candidates = await self.page.query_selector_all(selector)
+                    visible_candidates = []
+                    for cand in candidates:
+                        if await cand.is_visible():
+                            visible_candidates.append(cand)
+                    
+                    if len(visible_candidates) > 1:
+                        raise AuthenticationError(
+                            f"Ambiguous password selector '{selector}': found {len(visible_candidates)} visible matches. "
+                            f"Cannot safely select password input. Please verify login page structure."
+                        )
+                    elif len(visible_candidates) == 1:
+                        password_field = visible_candidates[0]
+                        logger.debug(f"✓ Found password field via: {selector}")
+                        break
 
                 if not password_field:
                     raise AuthenticationError(
                         "Could not locate password input field. "
-                        "Verify login page structure matches expected format."
+                        "Verify login page structure matches expected format. "
+                        f"Tried selectors: {password_selectors}"
                     )
 
                 await password_field.click()
@@ -209,41 +314,93 @@ class AuthManager:
 
     async def wait_for_authentication(self) -> None:
         """
-        Wait for successful authentication.
+        Wait for successful authentication with bounded 30s timeout.
 
         Hive is a SPA that uses client-side routing (pushState) after login.
-        We poll the page URL until it leaves the /login path. Also checks for
-        visible error messages on the page during polling so we can fail fast
-        instead of waiting the full timeout on wrong credentials.
+        Primary signal: jwtToken in localStorage (set immediately on login).
+        Secondary signals: page URL departure from /login, authenticated UI indicators.
+
+        Handles "Existing Session" modal: if dialog title is "Existing Session" and
+        Confirm button is visible, click it automatically to proceed with login.
 
         Raises:
             AuthenticationError: If authentication fails or times out
         """
         with LogContext("Waiting for authentication"):
             try:
-                logger.info("Waiting for authentication to complete...")
+                logger.info("Waiting for authentication to complete (30s timeout)...")
 
                 from urllib.parse import urlparse
 
                 login_path = urlparse(self.credentials.login_url).path.rstrip("/")
-                deadline_s = self.timeout_s
+                deadline_s = 30  # Explicit bounded 30s timeout per refinement
                 poll_interval_s = 0.5
                 elapsed = 0.0
+                pre_login_token = None
+
+                # Record pre-login token to distinguish fresh vs. stale tokens
+                try:
+                    pre_login_token = await self.page.evaluate("() => localStorage.getItem('jwtToken')")
+                    logger.debug(f"Pre-login jwtToken state: {'present' if pre_login_token else 'absent'}")
+                except Exception:
+                    pass
 
                 while elapsed < deadline_s:
+                    # --- Check for Existing Session dialog ---
+                    try:
+                        dialog_title = await self.page.evaluate("""() => {
+                            const dialog = document.querySelector('mat-dialog-container');
+                            if (!dialog) return null;
+                            const title = dialog.querySelector('[mat-dialog-title], h1, h2');
+                            return title ? title.innerText.trim() : null;
+                        }""")
+
+                        if dialog_title and "existing session" in dialog_title.lower():
+                            logger.info(f"Existing Session dialog detected: '{dialog_title}'")
+                            # Scoped check: Confirm button must be within the dialog AND dialog must be visible
+                            confirm_btn = await self.page.query_selector(
+                                "mat-dialog-container button:has-text('Confirm')"
+                            )
+                            if confirm_btn and await confirm_btn.is_visible():
+                                logger.info("Clicking Confirm button to proceed with login...")
+                                await confirm_btn.click()
+                                await asyncio.sleep(1.0)  # Wait for modal to close
+                                logger.debug("✓ Existing Session confirmed")
+                            else:
+                                logger.warning("Existing Session dialog visible but Confirm button not found or not visible")
+                    except Exception as e:
+                        logger.debug(f"Could not check for Existing Session dialog: {e}")
+
+                    # --- Primary check: jwtToken in localStorage (fresh token) ---
+                    try:
+                        current_token = await self.page.evaluate("() => localStorage.getItem('jwtToken')")
+                        if current_token and current_token != pre_login_token:
+                            logger.info("✓ Authentication successful - fresh jwtToken acquired")
+                            self.is_authenticated = True
+                            return
+                    except Exception as e:
+                        logger.debug(f"Could not read jwtToken from localStorage: {e}")
+
+                    # --- Secondary check: URL departure from /login ---
                     current_url = self.page.url
                     if current_url not in ("about:blank", ""):
                         current_path = urlparse(current_url).path.rstrip("/")
                         if current_path != login_path:
-                            logger.info(f"Redirected from login → {current_url}")
-                            break
+                            logger.info(f"✓ Redirected from login → {current_url}")
+                            # Verify we also have the token now
+                            try:
+                                token = await self.page.evaluate("() => localStorage.getItem('jwtToken')")
+                                if token:
+                                    logger.info("✓ Authentication successful - URL redirected and token present")
+                                    self.is_authenticated = True
+                                    return
+                            except Exception:
+                                pass
 
-                    # Check for error messages on the page every 2s
+                    # --- Check for error messages every 2s ---
                     if elapsed > 0 and elapsed % 2.0 < poll_interval_s:
                         try:
-                            body = await self.page.evaluate(
-                                "() => document.body.innerText"
-                            )
+                            body = await self.page.evaluate("() => document.body.innerText")
                             body_lower = body.lower()
                             failure_phrases = [
                                 "invalid credentials", "incorrect password",
@@ -266,31 +423,34 @@ class AuthManager:
 
                     await asyncio.sleep(poll_interval_s)
                     elapsed += poll_interval_s
-                else:
-                    # Timed out — try to capture any error message for context
-                    error_hint = ""
-                    try:
-                        body = await self.page.evaluate("() => document.body.innerText")
-                        lines = [l.strip() for l in body.split("\n") if l.strip()]
-                        error_hint = f" Page text: {' | '.join(lines[:5])}"
-                    except Exception:
-                        pass
-                    raise AuthenticationError(
-                        f"Login timeout after {deadline_s}s — URL never left /login."
-                        f"{error_hint}\n"
-                        "Check credentials in .env and Hive availability."
-                    )
 
-                # Brief settle for JS-rendered post-login content
-                await asyncio.sleep(1.5)
+                # --- Timeout expired ---
+                error_hint = ""
+                try:
+                    body = await self.page.evaluate("() => document.body.innerText")
+                    lines = [l.strip() for l in body.split("\n") if l.strip()]
+                    error_hint = f" Page text: {' | '.join(lines[:5])}"
+                except Exception:
+                    pass
 
-                self.is_authenticated = True
-                logger.info("Authentication successful")
+                # Capture debug screenshot
+                try:
+                    screenshot_path = "scratch/login_timeout.png"
+                    await self.page.screenshot(path=screenshot_path)
+                    logger.debug(f"Debug screenshot captured: {screenshot_path}")
+                except Exception as e:
+                    logger.debug(f"Could not capture screenshot: {e}")
+
+                raise AuthenticationError(
+                    f"Login completion timed out after {deadline_s}s — "
+                    f"jwtToken not acquired and URL did not redirect.{error_hint}\n"
+                    "Check credentials in .env, Hive availability, and network connectivity."
+                )
 
             except AuthenticationError:
                 raise
             except Exception as e:
-                logger.error(f"Authentication failed: {e}")
+                logger.error(f"Authentication wait failed: {e}")
                 raise AuthenticationError(f"Authentication verification failed: {e}") from e
 
 
@@ -298,9 +458,14 @@ class AuthManager:
 
     async def verify_session(self) -> bool:
         """
-        Verify that session is authenticated.
+        Verify that session is authenticated (bounded 10s timeout).
         
-        Checks for authenticated state indicators on the current page.
+        Primary signal: jwtToken in localStorage (Hive SPA auth mechanism).
+        Secondary signals: authenticated UI indicators, URL not on /login.
+        
+        For cold-start (fresh profile): jwtToken presence is conclusive.
+        For persistent profile: token may be stale. Also check UI indicators
+        to distinguish stale vs. active session.
         
         Returns:
             True if session appears to be authenticated
@@ -310,29 +475,71 @@ class AuthManager:
         """
         with LogContext("Verifying session"):
             try:
-                logger.info("Verifying authenticated session...")
+                logger.info("Verifying authenticated session (10s timeout)...")
 
-                # Check that we're not on login page
                 current_url = self.page.url
-                if self.credentials.login_url in current_url:
-                    logger.warning("Still on login page - session not authenticated")
+                
+                # 1. URL check: if still explicitly on /login, definitely not authenticated
+                if "/login" in current_url.lower():
+                    logger.debug(f"Still on login page ({current_url}) - session not authenticated")
                     return False
 
-                # Check for common authenticated UI elements
-                # (e.g., user menu, logout link, profile info)
-                auth_indicators = await self.page.query_selector_all(
-                    "[aria-label*='profile'], [aria-label*='user'], "
-                    "[aria-label*='account'], [href*='logout'], "
-                    "[href*='signout'], a:has-text('Logout'), "
-                    "a:has-text('Sign out')"
+                # 2. Primary check: jwtToken in localStorage (Hive SPA mechanism)
+                # This is the single most reliable indicator on Hive
+                try:
+                    auth_storage = await self.page.evaluate("""() => {
+                        return {
+                            jwt: localStorage.getItem('jwtToken'),
+                            username: localStorage.getItem('hive_username'),
+                            jwtExpiry: localStorage.getItem('jwtExpiry')
+                        };
+                    }""")
+
+                    jwt_token = auth_storage.get("jwt")
+                    stored_username = auth_storage.get("username")
+
+                    if jwt_token:
+                        # Token is present - this is the primary success signal
+                        logger.info(
+                            "✓ Session authenticated via localStorage (jwtToken present)"
+                        )
+                        self.is_authenticated = True
+                        return True
+
+                except Exception as e:
+                    logger.debug(f"Could not read localStorage for auth tokens: {e}")
+
+                # 3. Secondary check: username visible in navbar/header
+                try:
+                    user_element = await self.page.query_selector(f"text={self.credentials.username}")
+                    if user_element and await user_element.is_visible():
+                        logger.info(
+                            f"✓ Session verified - username '{self.credentials.username}' visible in UI"
+                        )
+                        self.is_authenticated = True
+                        return True
+                except Exception as e:
+                    logger.debug(f"Could not check username visibility in UI: {e}")
+
+                # 4. Fallback: common authenticated UI elements
+                try:
+                    auth_indicators = await self.page.query_selector_all(
+                        "[aria-label*='profile'], [aria-label*='user'], "
+                        "[aria-label*='account'], [href*='logout'], "
+                        "[href*='signout'], a:has-text('Logout'), "
+                        "a:has-text('Sign out')"
+                    )
+                    if auth_indicators and len(auth_indicators) > 0:
+                        logger.debug("Session verified - authenticated indicators found")
+                        self.is_authenticated = True
+                        return True
+                except Exception as e:
+                    logger.debug(f"Could not check authenticated indicators: {e}")
+
+                logger.warning(
+                    f"No authenticated indicators found on {current_url} - "
+                    "session may not be active or jwtToken may have expired"
                 )
-
-                if auth_indicators:
-                    logger.info("✓ Session verified - authenticated indicators found")
-                    self.is_authenticated = True
-                    return True
-
-                logger.warning("No authenticated indicators found - may not be logged in")
                 return False
 
             except Exception as e:
@@ -344,11 +551,14 @@ class AuthManager:
         Perform complete login workflow.
         
         Steps:
-        1. Navigate to login page
-        2. Fill credentials
-        3. Submit login
-        4. Wait for authentication
-        5. Verify session
+        1. Clear Hive authentication state (localStorage, session cookies)
+           - Keeps profile intact (extensions, other data)
+           - Forces fresh login every run
+        2. Navigate to login page
+        3. Fill credentials (always - explicit fresh login)
+        4. Submit and handle modal
+        5. Verify newly authenticated session
+        6. Verify logged-in account matches configured credentials
         
         Returns:
             True if login successful
@@ -360,11 +570,49 @@ class AuthManager:
             try:
                 logger.info("Starting login workflow...")
 
+                # Step 1: Logout from any existing session first
+                # Navigate to logout endpoint to clear server-side session
+                logger.info("Logging out from any existing session...")
+                try:
+                    logout_url = "https://hive.smartinterviews.in/logout"
+                    logger.debug(f"Navigating to logout: {logout_url}")
+                    await self.page.goto(logout_url, wait_until="networkidle", timeout=15000)
+                    await asyncio.sleep(2.0)  # Wait for logout to process
+                    logger.debug("✓ Logout request sent")
+                except Exception as e:
+                    logger.debug(f"Could not access logout endpoint: {e}")
+
+                # Step 2: Clear Hive authentication state from localStorage/sessionStorage
+                # This forces a fresh login every run while keeping browser profile intact
+                logger.info("Clearing Hive authentication state from browser...")
+                try:
+                    await self.page.evaluate("""() => {
+                        // Clear Hive-specific auth tokens and session
+                        localStorage.removeItem('jwtToken');
+                        localStorage.removeItem('hive_username');
+                        localStorage.removeItem('jwtExpiry');
+                        sessionStorage.clear();
+                        return true;
+                    }""")
+                    logger.debug("✓ Authentication state cleared from storage")
+                except Exception as e:
+                    logger.debug(f"Could not clear auth state: {e}")
+
+                # Step 3: Navigate to login page
                 await self.navigate_to_login()
+                await asyncio.sleep(1.0)  # Settle time
+
+                # Step 4: Fill credentials (always - explicit fresh login)
+                logger.info("Filling login credentials (explicit fresh login)...")
                 await self.fill_credentials()
+
+                # Step 5: Submit login
                 await self.submit_login()
+
+                # Step 6: Wait for authentication (handles modal)
                 await self.wait_for_authentication()
 
+                # Step 7: Verify session with newly acquired credentials
                 if await self.verify_session():
                     logger.info("✓ Login successful")
                     self.is_authenticated = True
@@ -377,3 +625,4 @@ class AuthManager:
             except Exception as e:
                 logger.error(f"Login workflow failed: {e}")
                 raise AuthenticationError(f"Login failed: {e}") from e
+

@@ -60,7 +60,7 @@ def config_manager(temp_dir, mock_config):
     with open(config_file, 'w') as f:
         yaml.dump(mock_config, f)
 
-    return ConfigManager(config_file=str(config_file))
+    return ConfigManager(config_file=str(config_file), load_env_file=False)
 
 
 @pytest.fixture
@@ -129,10 +129,17 @@ def test_credentials():
 
 
 @pytest.fixture(autouse=True)
-def cleanup():
-    """Cleanup after each test"""
+def cleanup(monkeypatch):
+    """Cleanup and isolate environment before and after each test"""
+    test_env_vars = [
+        "HIVE_USERNAME", "HIVE_PASSWORD", "HIVE_LOGIN_URL", "HIVE_CONTEST_URL",
+        "BROWSER_HEADLESS", "BROWSER_PROFILE_PATH", "DEFAULT_LANGUAGE", "MAX_ATTEMPTS",
+        "GROQ_MODEL", "GEMINI_MODEL",
+        "GROQ_API_KEY", "GEMINI_API_KEY"
+    ]
+    for var in test_env_vars:
+        monkeypatch.delenv(var, raising=False)
     yield
-    # Add any cleanup code here if needed
 
 
 # Mark tests as async

@@ -25,13 +25,17 @@ Phase 1 implementation:
   live testing and documented for Phase 2 hardening.
 """
 
+import asyncio
+import json
+from pathlib import Path
+from typing import List, Optional
 from playwright.async_api import Page
 
 from src.utils import get_logger, ExtensionError, LogContext
 
 logger = get_logger(__name__)
 
-# The Hive Extension Detector Chrome Web Store ID (from spec URL)
+# The Hive Extension Detector Chrome Web Store ID
 EXTENSION_ID = "goknflnoeiaookhdbnldcbnodjahpgdh"
 EXTENSION_STORE_URL = (
     "https://chromewebstore.google.com/detail/hive-extension-detector/"
@@ -39,7 +43,6 @@ EXTENSION_STORE_URL = (
 )
 
 # Text fragments Hive displays in the extension-required modal
-# These will be confirmed/refined during live testing.
 EXTENSION_MODAL_SIGNALS = [
     "extension required",          # Modal heading (case-insensitive)
     "hive extension detector",     # Extension name mentioned in modal
@@ -49,181 +52,225 @@ EXTENSION_MODAL_SIGNALS = [
 
 class ExtensionChecker:
     """
-    Verifies that the Hive Extension Detector is active in the browser.
+    Verifies that the Hive Extension Detector is active in the browser using
+    a strict multi-tier verification hierarchy:
 
-    The primary signal we inspect:
-    1. Whether Hive's "Extension Required" modal is present on the page.
-       - Modal absent → extension is working correctly.
-       - Modal present → extension is missing or disabled; raise ExtensionError.
-
-    Secondary signals (added after live DOM inspection in Phase 2):
-    - window.hiveExtension or equivalent JS property set by the extension.
-    - Specific network requests made by the extension (via page.route).
-
-    This class must be instantiated AFTER the bot has navigated to a Hive page
-    (post-login) where the extension gate could appear.
+    Tier 1: Browser / Profile verification
+            -> Verify Hive Extension Detector ID exists in the persistent Chrome profile
+    Tier 2: Extension runtime verification
+            -> Verify actual extension service worker / background is active in browser context
+    Tier 3: Hive platform verification
+            -> Verify <app-extension-blocker> is absent or dismissed on the contest page
+    Tier 4: Only then proceed to Continue Contest.
     """
 
-    def __init__(self, page: Page):
+    def __init__(self, page: Page, profile_path: Optional[Path] = None):
         """
         Initialize ExtensionChecker.
 
         Args:
-            page: Playwright Page object, must be on a Hive page.
+            page: Playwright Page object.
+            profile_path: Optional path to Chrome profile root directory.
         """
         self.page = page
+        self.profile_path = (
+            Path(profile_path).expanduser().resolve() if profile_path else None
+        )
         logger.debug("ExtensionChecker initialized")
+
+    def verify_profile_installation(self, profile_path: Optional[Path] = None) -> bool:
+        """
+        Tier 1: Profile verification.
+        Verify that the Hive Extension Detector files exist in the Chrome profile.
+
+        Args:
+            profile_path: Path to Chrome profile (defaults to self.profile_path).
+
+        Returns:
+            True if extension files or preferences record exists in profile.
+        """
+        target_profile = (
+            Path(profile_path).expanduser().resolve()
+            if profile_path
+            else self.profile_path
+        )
+        if not target_profile:
+            logger.warning("No profile_path provided for Tier 1 profile verification")
+            return False
+
+        ext_dir = target_profile / "Default" / "Extensions" / EXTENSION_ID
+        if ext_dir.exists() and any(ext_dir.iterdir()):
+            logger.info(f"✓ Tier 1 Passed: Extension ID '{EXTENSION_ID}' found in profile extensions at {ext_dir}")
+            return True
+
+        # Also inspect Preferences JSON as a secondary check
+        prefs_path = target_profile / "Default" / "Preferences"
+        if prefs_path.exists():
+            try:
+                with open(prefs_path, "r", encoding="utf-8") as f:
+                    prefs = json.load(f)
+                settings = prefs.get("extensions", {}).get("settings", {})
+                if EXTENSION_ID in settings:
+                    logger.info(f"✓ Tier 1 Passed: Extension ID '{EXTENSION_ID}' registered in Chrome Preferences")
+                    return True
+            except Exception as e:
+                logger.debug(f"Could not read profile preferences: {e}")
+
+        logger.warning(f"Tier 1 Failed: Extension ID '{EXTENSION_ID}' not found in profile: {target_profile}")
+        return False
+
+    async def verify_runtime_active(self, retries: int = 3, retry_delay_s: float = 1.0) -> bool:
+        """
+        Tier 2: Extension runtime verification.
+        Verify that the extension's service worker or background page is running
+        in the current Playwright BrowserContext.
+
+        Args:
+            retries: Number of attempts to observe the running extension process.
+            retry_delay_s: Delay between attempts.
+
+        Returns:
+            True if extension runtime is actively running.
+        """
+        context = self.page.context
+        for attempt in range(1, retries + 1):
+            # Check active service workers (Manifest V3)
+            workers = context.service_workers
+            for sw in workers:
+                if EXTENSION_ID in sw.url:
+                    logger.info(f"✓ Tier 2 Passed: Extension service worker active: {sw.url}")
+                    return True
+
+            # Check active background pages (Manifest V2 / fallbacks)
+            bg_pages = context.background_pages
+            for bp in bg_pages:
+                if EXTENSION_ID in bp.url:
+                    logger.info(f"✓ Tier 2 Passed: Extension background page active: {bp.url}")
+                    return True
+
+            if attempt < retries:
+                logger.debug(f"Tier 2 check attempt {attempt}/{retries} pending; waiting {retry_delay_s}s...")
+                await asyncio.sleep(retry_delay_s)
+
+        logger.warning(f"Tier 2 Failed: No active service worker or background page found for extension '{EXTENSION_ID}'.")
+        return False
 
     async def is_extension_modal_visible(self) -> bool:
         """
-        Detect whether Hive is currently showing the 'Extension Required' modal.
-
-        Strategy: look for the known text signals of the modal in page content.
-        Returns True if the modal is present (meaning extension is NOT active).
-
-        Returns:
-            True if the extension-required modal is visible.
-            False if the modal is absent (extension appears active).
+        Detect whether Hive is currently showing the 'Extension Required' modal or blocker.
         """
         try:
-            page_text = await self.page.evaluate("() => document.body.innerText")
-            page_text_lower = page_text.lower()
+            # Check for <app-extension-blocker> custom element
+            blocker = self.page.locator("app-extension-blocker")
+            if await blocker.count() > 0:
+                is_vis = await blocker.first.is_visible()
+                if is_vis:
+                    raw_text = None
+                    text = ""
+                    try:
+                        raw_text = await blocker.first.inner_text()
+                        text = str(raw_text).strip() if raw_text else ""
+                    except Exception:
+                        pass
 
+                    # On real Hive, the Angular component stays in DOM but clears its inner
+                    # content (inner_text == "") once the genuine extension is verified.
+                    if raw_text is not None and text == "":
+                        logger.debug("app-extension-blocker is present but empty (dismissed)")
+                    else:
+                        logger.debug(f"app-extension-blocker is present and visible with content: {repr(text[:50])}")
+                        return True
+
+            # Also check for overlay or modal text signals
+            page_text = await self.page.evaluate("() => document.body ? document.body.innerText : ''")
+            page_text_lower = page_text.lower()
             for signal in EXTENSION_MODAL_SIGNALS:
                 if signal in page_text_lower:
                     logger.debug(f"Extension modal signal detected: '{signal}'")
                     return True
 
-            # Also try to find a modal/dialog element containing extension text
-            # This covers SPAs that render modals in a portal outside body
-            try:
-                modal_locator = self.page.locator(
-                    "[role='dialog'], .modal, [class*='modal'], [class*='Modal']"
-                )
-                modal_count = await modal_locator.count()
-                if modal_count > 0:
-                    modal_text = await modal_locator.first.inner_text()
-                    modal_text_lower = modal_text.lower()
-                    for signal in EXTENSION_MODAL_SIGNALS:
-                        if signal in modal_text_lower:
-                            logger.debug(
-                                f"Extension modal found inside dialog element: '{signal}'"
-                            )
-                            return True
-            except Exception:
-                # Non-critical: page.locator().count() might fail on some pages
-                pass
-
             return False
-
         except Exception as e:
             logger.warning(f"Could not inspect page for extension modal: {e}")
-            # Conservative: if we can't read the page, don't assume extension is ok
             return False
 
-    async def check_js_extension_marker(self) -> bool | None:
+    async def verify_hive_blocker_dismissed(self, timeout_s: float = 10.0) -> bool:
         """
-        Check for a JavaScript window property exposed by the Hive Extension Detector.
+        Tier 3: Hive platform verification.
+        Verify that <app-extension-blocker> is absent or dismissed on the contest page.
 
-        The exact property name is unknown until live inspection.
-        This is a best-effort check; returns None if no known property is found.
+        Args:
+            timeout_s: Maximum seconds to wait for Hive Angular app to dismiss blocker.
 
         Returns:
-            True  — a known extension marker JS property exists.
-            False — a known marker property is explicitly absent.
-            None  — could not determine (marker property name not yet discovered).
+            True if blocker is absent or dismissed; False if blocker persists.
         """
-        # TODO: Replace these candidate names after live DOM inspection in Phase 2.
-        candidate_properties = [
-            "window.hiveExtension",
-            "window.__hiveExtDetector__",
-            "window.HIVE_EXT",
-        ]
+        poll_interval = 0.5
+        elapsed = 0.0
+        while elapsed < timeout_s:
+            modal_visible = await self.is_extension_modal_visible()
+            if not modal_visible:
+                logger.info("✓ Tier 3 Passed: Hive extension blocker is absent or dismissed.")
+                return True
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
 
-        for prop in candidate_properties:
-            try:
-                result = await self.page.evaluate(f"() => typeof {prop} !== 'undefined'")
-                if result:
-                    logger.debug(f"Extension JS marker found: {prop}")
-                    return True
-            except Exception:
-                continue
+        logger.error(f"Tier 3 Failed: Hive extension blocker remained visible after {timeout_s}s.")
+        return False
 
-        logger.debug(
-            "No known extension JS marker found. "
-            "Marker property name will be discovered during live Phase 2 testing."
-        )
-        return None
+    async def verify_extension_ready(
+        self,
+        profile_path: Optional[Path] = None,
+        timeout_s: float = 10.0
+    ) -> bool:
+        """
+        Execute full 3-tier verification hierarchy in accordance with project requirements:
+        1. Browser/profile verification (ID exists in profile)
+        2. Extension runtime verification (actual extension running in context)
+        3. Hive verification (<app-extension-blocker> absent/dismissed)
+
+        Returns:
+            True if all 3 tiers pass.
+
+        Raises:
+            ExtensionError: If any tier fails, detailing exact diagnosis.
+        """
+        with LogContext("Verifying Extension Ready (Multi-Tier Hierarchy)"):
+            # Tier 1: Browser / profile verification
+            profile = profile_path or self.profile_path
+            if profile and not self.verify_profile_installation(profile):
+                raise ExtensionError(
+                    f"Tier 1 Failure: Hive Extension Detector ('{EXTENSION_ID}') is not installed in "
+                    f"the persistent Chrome profile at '{profile}'."
+                )
+
+            # Tier 2: Extension runtime verification
+            runtime_ok = await self.verify_runtime_active()
+            if not runtime_ok:
+                raise ExtensionError(
+                    f"Tier 2 Failure: Hive Extension Detector ('{EXTENSION_ID}') is present in profile, "
+                    f"but its service worker/process is not active in the browser runtime."
+                )
+
+            # Tier 3: Hive platform verification
+            blocker_dismissed = await self.verify_hive_blocker_dismissed(timeout_s=timeout_s)
+            if not blocker_dismissed:
+                raise ExtensionError(
+                    "Tier 3 Failure: Hive platform has not unblocked the contest. "
+                    "<app-extension-blocker> is actively preventing navigation."
+                )
+
+            logger.info("✓ All 3 extension verification tiers passed successfully.")
+            return True
 
     async def verify_extension(self) -> bool:
         """
-        Full extension verification for Phase 1.
-
-        Logic:
-        1. Check whether the extension-required modal is visible.
-           - If visible → extension not working → raise ExtensionError.
-           - If not visible → extension is plausibly active → continue.
-        2. Optionally probe for JS window marker (best-effort, not blocking).
-
-        NOTE: Phase 1 performs this check AFTER navigation to the login/home URL.
-        The modal only appears when the user tries to start a contest, so if the
-        bot is still on the login page before entering any contest, the modal will
-        not be visible yet.
-
-        In that case, the bot logs a NOTE and continues. The live-test run will
-        reveal whether and where the modal appears.
-
-        Returns:
-            True if no extension modal is detected.
-
-        Raises:
-            ExtensionError: If the extension-required modal is detected.
+        Backwards-compatible wrapper for Phase 1 calls.
         """
-        with LogContext("Verifying Hive Extension"):
-            logger.info("Checking Hive Extension Detector status...")
-
-            current_url = self.page.url
-            logger.debug(f"Checking extension on page: {current_url}")
-
-            # Primary signal: extension-required modal
-            modal_visible = await self.is_extension_modal_visible()
-
-            if modal_visible:
-                logger.error(
-                    "Hive Extension Detector is NOT active. "
-                    "Hive is displaying the 'Extension Required' modal."
-                )
-                raise ExtensionError(
-                    "Hive Extension Detector is required but not active.\n"
-                    "\n"
-                    "To fix this:\n"
-                    f"  1. Install the extension: {EXTENSION_STORE_URL}\n"
-                    "  2. Open chrome://extensions/ and enable 'Hive Extension Detector'.\n"
-                    "  3. Disable all other extensions (except Hive Extension Detector).\n"
-                    "  4. Rerun the bot — it will use the same Chrome profile where the\n"
-                    f"     extension is installed.\n"
-                    "\n"
-                    "The bot uses a persistent Chrome profile. Once you install and enable\n"
-                    "the extension in that profile, the bot will work on subsequent runs."
-                )
-
-            # Secondary signal: JS marker (informational, not blocking in Phase 1)
-            marker_found = await self.check_js_extension_marker()
-            if marker_found is True:
-                logger.info("✓ Extension JS marker present — extension is active")
-            elif marker_found is None:
-                logger.info(
-                    "✓ No 'Extension Required' modal detected. "
-                    "Extension JS marker property not yet identified (Phase 2 TODO). "
-                    "Proceeding on assumption that extension is installed in this profile."
-                )
-            else:
-                logger.warning(
-                    "Extension JS marker not present. "
-                    "This may mean the extension is not installed, or the marker "
-                    "property name differs from our candidates. "
-                    "Will confirm during live testing on a Hive contest page."
-                )
-
-            logger.info("✓ Hive Extension check passed (no modal detected)")
-            return True
+        modal_visible = await self.is_extension_modal_visible()
+        if modal_visible:
+            raise ExtensionError(
+                "Hive Extension Detector is required but not active.\n"
+                f"Store URL: {EXTENSION_STORE_URL}"
+            )
+        return True

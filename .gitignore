@@ -1,0 +1,58 @@
+# =====================================================================
+# Hive Automation Bot - .gitignore
+# =====================================================================
+
+# Environment variables & secrets (NEVER COMMIT)
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+venv_*/
+env/
+ENV/
+
+# Testing & coverage artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Bot runtime logs & ephemeral outputs
+logs/
+*.log
+
+# Scratch research, temporary test runs, and debug dumps
+scratch/
+
+# Runtime state files (allow fixtures in tests/)
+state/*.json
+!state/.gitkeep
+state/*.tmp
+*.tmp
+
+# Ephemeral root-level screenshots generated during local runs
+/*.png
+
+# Local browser profile & cache directories
+.hive_bot_profile/
+~*
+~
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini

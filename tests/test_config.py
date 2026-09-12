@@ -148,3 +148,64 @@ class TestCredentialsLoading:
 
         with pytest.raises(ConfigError):
             Credentials.from_config(manager)
+
+
+class TestPhase3SolverConfig:
+    """Test Phase 3 solver and provider model configuration."""
+
+    def test_default_solver_settings(self, temp_dir):
+        """Test default language and max attempts from default config"""
+        config_file = temp_dir / "config.yaml"
+        with open(config_file, 'w') as f:
+            yaml.dump({}, f)
+
+        manager = ConfigManager(config_file=str(config_file))
+        assert manager.get("solver.default_language") == "C++"
+        assert manager.get("solver.max_attempts") == 5
+
+    def test_env_override_solver_settings(self, temp_dir):
+        """Test overriding solver settings via environment variables"""
+        config_file = temp_dir / "config.yaml"
+        with open(config_file, 'w') as f:
+            yaml.dump({}, f)
+
+        os.environ["DEFAULT_LANGUAGE"] = "Python"
+        os.environ["MAX_ATTEMPTS"] = "3"
+
+        try:
+            manager = ConfigManager(config_file=str(config_file))
+            assert manager.get("solver.default_language") == "Python"
+            assert manager.get("solver.max_attempts") == 3
+        finally:
+            del os.environ["DEFAULT_LANGUAGE"]
+            del os.environ["MAX_ATTEMPTS"]
+
+    def test_provider_models_loaded_from_env(self, temp_dir):
+        """Test loading provider models dynamically from environment"""
+        config_file = temp_dir / "config.yaml"
+        with open(config_file, 'w') as f:
+            yaml.dump({}, f)
+
+        os.environ["GROQ_MODEL"] = "test-groq-model"
+        os.environ["GEMINI_MODEL"] = "test-gemini-model"
+
+        try:
+            manager = ConfigManager(config_file=str(config_file))
+            assert manager.get_provider_model("groq") == "test-groq-model"
+            assert manager.get_provider_model("gemini") == "test-gemini-model"
+        finally:
+            del os.environ["GROQ_MODEL"]
+            del os.environ["GEMINI_MODEL"]
+
+    def test_get_provider_model_missing_fails_loudly(self, temp_dir):
+        """Test that missing provider model raises ConfigError with zero fallback strings"""
+        config_file = temp_dir / "config.yaml"
+        with open(config_file, 'w') as f:
+            yaml.dump({}, f)
+
+        manager = ConfigManager(config_file=str(config_file))
+        with pytest.raises(ConfigError) as exc_info:
+            manager.get_provider_model("groq")
+
+        assert "Missing required model ID for provider 'groq'" in str(exc_info.value)
+        assert "GROQ_MODEL" in str(exc_info.value)

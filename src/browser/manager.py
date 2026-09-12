@@ -50,6 +50,7 @@ class BrowserManager:
         headless: bool = False,
         timeout_ms: int = 30000,
         extra_args: Optional[List[str]] = None,
+        channel: Optional[str] = None,
     ):
         """
         Initialize BrowserManager.
@@ -62,15 +63,16 @@ class BrowserManager:
                       Set headless=False when the Hive Extension Detector is required.
             timeout_ms: Default timeout for browser operations in milliseconds.
             extra_args: Additional Chrome CLI arguments to pass at launch.
-                        Used during first-run extension installation to pass
-                        --load-extension and --disable-extensions-except flags.
-                        Leave None for all normal bot runs (extension loads
-                        automatically from the persistent profile).
+                        Used to pass --load-extension and --disable-extensions-except flags.
+            channel: Browser distribution channel.
+                     None = Playwright Chromium / Chrome for Testing (recommended),
+                     'chrome' = system-installed Google Chrome.
         """
         self.profile_path = Path(profile_path).expanduser().resolve()
         self.headless = headless
         self.timeout_ms = timeout_ms
         self.extra_args: List[str] = extra_args or []
+        self.channel = channel
 
         # With launch_persistent_context the 'context' is returned directly —
         # there is no separate Browser object in the Playwright API.
@@ -124,35 +126,68 @@ class BrowserManager:
                 # scripts execute on Hive pages.
                 launch_kwargs = dict(
                     user_data_dir=str(self.profile_path),
-                    channel="chrome",       # Use installed Google Chrome binary
                     headless=self.headless,
                     ignore_default_args=["--disable-extensions"],
                 )
+                if self.channel:
+                    launch_kwargs["channel"] = self.channel
+                    if self.channel == "chrome":
+                        logger.warning(
+                            "channel='chrome': branded Google Chrome may fail the Hive extension gate on this environment. "
+                            "Chrome for Testing (channel=None) is recommended for unpacked extension execution."
+                        )
+                else:
+                    logger.info("Using Chrome for Testing / Playwright Chromium runtime (channel=None)")
+
                 if self.extra_args:
                     launch_kwargs["args"] = self.extra_args
-                    logger.debug(f"Extra Chrome args: {self.extra_args}")
+                    logger.debug(f"Extra browser args: {self.extra_args}")
+
                 self.context = await self.playwright.chromium.launch_persistent_context(
                     **launch_kwargs
                 )
                 self.context.set_default_timeout(self.timeout_ms)
 
-
+                browser_desc = self.channel if self.channel else "Chrome for Testing (Chromium)"
                 logger.info(
-                    f"✓ Chrome launched with persistent profile: {self.profile_path}"
+                    f"✓ {browser_desc} launched with persistent profile: {self.profile_path}"
                 )
 
             except Exception as e:
-                logger.error(f"Failed to launch Chrome: {e}")
+                logger.error(f"Failed to launch browser: {e}")
                 # Provide actionable guidance for the most common failure
                 if "Executable doesn't exist" in str(e) or "chrome" in str(e).lower():
                     logger.error(
-                        "Google Chrome not found. Playwright uses channel='chrome' to locate "
-                        "the system-installed Google Chrome binary. "
-                        "Ensure Chrome is installed at one of: "
-                        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe  OR  "
-                        "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"
+                        "Browser executable not found. "
+                        "If channel='chrome' was specified, ensure Google Chrome is installed. "
+                        "Otherwise run `playwright install chromium` to install Chrome for Testing."
                     )
                 raise BrowserError(f"Browser launch failed: {e}") from e
+
+    async def get_runtime_info(self) -> dict:
+        """
+        Get runtime identity and executable info for the launched browser.
+
+        Returns:
+            Dict containing requested_channel, executable_path, user_agent,
+            profile_path, and headless status.
+        """
+        exec_path = (
+            self.playwright.chromium.executable_path if self.playwright else "unknown"
+        )
+        user_agent = "unknown"
+        if self.page and not self.page.is_closed():
+            try:
+                user_agent = await self.page.evaluate("() => navigator.userAgent")
+            except Exception:
+                pass
+        return {
+            "requested_channel": self.channel,
+            "executable_path": exec_path,
+            "user_agent": user_agent,
+            "profile_path": str(self.profile_path),
+            "headless": self.headless,
+        }
 
     async def get_page(self) -> Page:
         """

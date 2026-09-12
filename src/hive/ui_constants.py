@@ -1,35 +1,47 @@
 """
-Hive UI Constants and Selectors
+Hive UI Constants and Discovered Selectors.
 
-IMPORTANT: This file documents discovered selectors AFTER DOM inspection.
-DO NOT hard-code assumptions. Selectors are discovered at runtime through
-DevTools inspection on the actual Hive platform.
-
-Format for discovered selectors:
-- XPath: Full XPath to element
-- CSS: CSS selector if preferred
-- Context: Where selector is used (e.g., "Problem list page")
-- Notes: Any special handling or edge cases
-
-This file will be populated during Phase 1 live inspection.
+Empirically discovered from live inspection of the Hive platform:
+- Contest dashboard (/contests/<name>)
+- Problem list (/contests/<name>/problems)
+- Problem viewer (/contests/<name>/problems/<id>)
 """
 
-# Placeholder - Selectors will be discovered and documented here during
-# Phase 1 implementation when testing against actual Hive platform.
-# See: https://github.com/your-repo/docs/hive-dom-discovery.md
+# Contest Navigation Selectors
+CONTEST_CONTINUE_BUTTON = "button:has-text('Continue Contest'), a:has-text('Continue Contest'), button:has-text('Start Contest')"
+CONTEST_EXTENSION_BLOCKER = "app-extension-blocker"
+CONTEST_EXTENSION_INSTALL_BUTTON = "button:has-text('Install Hive Extension Detector')"
 
-# Example format (to be replaced with actual discoveries):
-# LOGIN_PAGE_USERNAME_INPUT = "input[type='email']"  # or input[name='username']
-# LOGIN_PAGE_PASSWORD_INPUT = "input[type='password']"
-# LOGIN_PAGE_SUBMIT_BUTTON = "button:text('Log in')"
-# PROBLEM_LIST_CONTAINER = "div.problem-list"  # or similar
-# PROBLEM_CARD = "div.problem-card"
-# UNSOLVED_PROBLEMS_XPATH = "//div[@data-solved='false']"
+# Problem List Selectors
+PROBLEM_ROW_CONTAINER = ".problem, .problem-card, mat-card, [class*='problem-card']"
+# "Try Again" = solved, "Solve" / "Continue" = unsolved.
+# IMPORTANT: Use text-is() (exact match) for short words like "Continue" and "Solve"
+# to avoid matching "Continue Contest" or other buttons containing these words as substrings.
+# has-text() is a substring/partial match in Playwright; text-is() requires exact equality.
+PROBLEM_ACTION_BUTTON = "button:text-is('Try Again'), button:text-is('Solve'), button:text-is('Continue')"
+PROBLEM_ACCEPTED_CHECKMARK = "mat-icon, svg, [class*='check'], [class*='success'], [mattooltip*='Accepted']"
+PROBLEM_TITLE_LINK = "h2, h3, h4, .title, a[href*='problem']"
 
-# Status indicators (must be discovered from actual Hive UI)
-# PROBLEM_STATUS_SOLVED = "Try Again"  # Indicates already solved
-# PROBLEM_STATUS_UNSOLVED = "Continue"  # Indicates unsolved
-# PROBLEM_STATUS_UNSTARTED = "Solve"    # Indicates not started
+# Pagination
+PAGINATOR_CONTAINER = "mat-paginator, .pagination, [class*='paginator']"
+NEXT_PAGE_BUTTON = "button[aria-label='Next page'], .mat-paginator-navigation-next, button:has-text('Next')"
 
-print("Note: Hive UI selectors will be discovered during Phase 1 live testing")
-print("No hard-coded selectors present - safe for production")
+# Problem Detail Selectors (Empirically discovered)
+PROBLEM_DETAIL_TITLE = "app-question .question-wrapper p, p[style*='font-size: 28px'], .problem-title"
+PROBLEM_DETAIL_DESCRIPTION = "div.description"
+PROBLEM_DETAIL_CONTAINER = "app-question"
+
+# Language Selector
+LANGUAGE_SELECT_CONTAINER = ".language-dropdown mat-select, mat-select[formcontrolname='language']"
+LANGUAGE_OPTION = "mat-option, [role='option']"
+
+# Editor & Action Buttons
+EDITOR_CONTAINER = "#editor, ngx-monaco-editor#editor"
+RUN_CODE_BUTTON = "button:has-text('Run')"
+SUBMIT_CODE_BUTTON = "button:has-text('Submit')"
+CONSOLE_TOGGLE_BUTTON = "button:has-text('Console')"
+CONSOLE_DRAWER = ".console, app-console"
+NEXT_UNSOLVED_BUTTON = "button:has-text('Next Unsolved Problem')"
+SUBMISSIONS_TAB = "div[role='tab']:has-text('Submissions')"
+PROBLEM_TAB = "div[role='tab']:has-text('Problem')"
+

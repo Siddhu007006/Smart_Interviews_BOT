@@ -37,6 +37,7 @@ import io
 import json
 import shutil
 import struct
+import sys
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -248,6 +249,31 @@ class ExtensionInstaller:
     # Public API
     # ------------------------------------------------------------------
 
+    def get_extension_path(self) -> Path:
+        """Return the path to the unpacked genuine extension directory."""
+        return self._ext_unpack_dir
+
+    def get_extension_args(self) -> list[str]:
+        """
+        Return the CLI arguments required by Chromium/Chrome to load the genuine extension.
+        Uses 8.3 short path on Windows if available to prevent CLI space-splitting issues.
+        """
+        ext_path = self.get_extension_path()
+        clean_path = str(ext_path)
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                buffer = ctypes.create_unicode_buffer(260)
+                res = ctypes.windll.kernel32.GetShortPathNameW(clean_path, buffer, 260)
+                if res > 0:
+                    clean_path = buffer.value
+            except Exception as e:
+                logger.debug(f"Could not get short path for extension: {e}")
+        return [
+            f"--disable-extensions-except={clean_path}",
+            f"--load-extension={clean_path}",
+        ]
+
     def is_installed_in_profile(self) -> bool:
         """
         True if the extension is already installed in the Chrome profile.
@@ -256,7 +282,7 @@ class ExtensionInstaller:
           <profile>/Default/Extensions/<extension_id>/
         """
         ext_path = self.profile_path / "Default" / "Extensions" / EXTENSION_ID
-        return ext_path.exists()
+        return ext_path.exists() and any(ext_path.iterdir())
 
     def ensure_installed(self) -> None:
         """

@@ -34,6 +34,8 @@ class Credentials:
             f"login_url={self.login_url!r})"
         )
 
+    __str__ = __repr__
+
     @classmethod
     def from_config(cls, config_manager: ConfigManager) -> "Credentials":
         """

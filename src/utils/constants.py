@@ -39,6 +39,7 @@ class VerdictType(str, Enum):
     TIME_LIMIT_EXCEEDED = "Time Limit Exceeded"
     COMPILATION_ERROR = "Compilation Error"
     MEMORY_LIMIT = "Memory Limit Exceeded"
+    PARTIALLY_ACCEPTED = "Partially Accepted"
     UNKNOWN = "Unknown"
 
 
