@@ -35,30 +35,36 @@ logger = get_logger(__name__)
 @dataclass
 class Problem:
     """
-    Represents a Hive problem metadata.
+    Represents a Hive problem metadata with exact classification by action button text.
     
     Attributes:
         problem_id: Unique problem identifier / slug
         title: Problem title
         url: Full or relative problem URL
         score: Score integer (e.g. 20)
-        solved: Whether problem is already solved
-        status: String status ("Accepted" or "Unsolved")
+        action_button_text: Exact action button text ("Try Again", "Continue", "Solve")
+        status_icon: Status icon type ("green_tick", "yellow_exclamation", "yellow_partial_tick", "open", "bookmark", "mail", None)
+        classification: Problem classification ("SOLVED", "UNSOLVED_CONTINUE", "UNSOLVED_SOLVE", "UNKNOWN")
+        solved: Whether problem is solved (True if classification == "SOLVED")
+        status: String status ("Accepted" or "Unsolved") — deprecated, use classification instead
         difficulty: Optional difficulty level (Easy, Medium, Hard)
         category: Optional problem category/topic
     """
     problem_id: str
     title: str
     url: str
+    action_button_text: str  # Exact button text from DOM
     score: int = 0
-    solved: bool = False
-    status: str = "Unsolved"
+    status_icon: Optional[str] = None  # Icon type if present
+    classification: str = "UNKNOWN"  # SOLVED, UNSOLVED_CONTINUE, UNSOLVED_SOLVE, UNKNOWN
+    solved: bool = False  # True if classification == "SOLVED"
+    status: str = "Unsolved"  # For backward compatibility
     difficulty: Optional[str] = None
     category: Optional[str] = None
 
     def __repr__(self) -> str:
         status_icon = "✓" if self.solved else "○"
-        return f"{status_icon} Problem(id={self.problem_id}, title='{self.title}', score={self.score}, solved={self.solved})"
+        return f"{status_icon} Problem(id={self.problem_id}, title='{self.title}', action={self.action_button_text}, classification={self.classification})"
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for state storage or logging."""
@@ -66,7 +72,10 @@ class Problem:
             "problem_id": self.problem_id,
             "title": self.title,
             "url": self.url,
+            "action_button_text": self.action_button_text,
             "score": self.score,
+            "status_icon": self.status_icon,
+            "classification": self.classification,
             "solved": self.solved,
             "status": self.status,
             "difficulty": self.difficulty,
@@ -211,22 +220,22 @@ class ProblemListDetector:
         
         Uses empirical DOM extraction:
         - Finds problem rows / cards
-        - Extracts title, URL link, score
-        - Detects solved status from checkmark icon / 'Try Again' button text
+        - Extracts title, URL link, score, action button text, status icon
+        - Classifies each problem by action button text (Try Again, Continue, Solve)
         
         Returns:
-            List of Problem objects
+            List of Problem objects with exact classification
         """
         with LogContext("Fetching problem list"):
             try:
                 # Evaluate in page context to extract structured problem data
                 raw_problems = await self.page.evaluate(r'''() => {
                     const results = [];
-                    // Find action buttons:
-                    //   "Try Again" = solved (Accepted), "Solve" = unsolved (never started),
-                    //   "Continue" = unsolved (started but not submitted).
-                    // Uses ^ and $ anchors for exact text matching — prevents matching
-                    // "Continue Contest" or other buttons containing these words as substrings.
+                    
+                    // Find action buttons: exact text matching only (not substring)
+                    // "Try Again" = green tick (solved)
+                    // "Continue" = previously attempted (unsolved)
+                    // "Solve" = never attempted (unsolved)
                     const buttons = Array.from(document.querySelectorAll("button, a")).filter(el => {
                         const t = (el.innerText || "").trim();
                         return /^Try Again$/i.test(t) || /^Solve$/i.test(t) || /^Continue$/i.test(t);
@@ -234,7 +243,6 @@ class ProblemListDetector:
 
                     for (const btn of buttons) {
                         const btnText = (btn.innerText || "").trim();
-                        const isSolvedByBtn = /^Try Again$/i.test(btnText);
 
                         // Find enclosing container (card / row)
                         let container = btn.parentElement;
@@ -251,13 +259,13 @@ class ProblemListDetector:
                         // Title element - prioritize .problem-title before falling back to generic headings or links
                         const titleEl = container.querySelector(".problem-title, h2, h3, h4, .title") || container.querySelector("a[href*='problem']");
                         let title = titleEl ? titleEl.innerText.trim() : "";
-                        if (!title || /^try again$/i.test(title) || /^solve$/i.test(title)) {
+                        if (!title || /^try again$/i.test(title) || /^solve$/i.test(title) || /^continue$/i.test(title)) {
                             const pTitle = container.querySelector(".problem-title");
                             if (pTitle) title = pTitle.innerText.trim();
                         }
                         if (!title) continue;
 
-                        // Problem Link / Href
+                        // Problem Link / Href - use actual DOM href (authoritative)
                         let href = "";
                         if (titleEl && titleEl.tagName === "A" && titleEl.href) {
                             href = titleEl.href;
@@ -270,9 +278,38 @@ class ProblemListDetector:
                             }
                         }
 
-                        // Checkmark element (Accepted indicator)
+                        // Status icon detection
+                        let statusIcon = null;
                         const checkmark = container.querySelector("mat-icon, svg, [class*='check'], [class*='success'], [mattooltip*='Accepted']");
-                        const isSolved = isSolvedByBtn || (checkmark !== null);
+                        
+                        // Detect icon type from class names, colors, or content
+                        if (checkmark) {
+                            const classList = checkmark.className || "";
+                            const style = window.getComputedStyle(checkmark);
+                            const color = style.color || style.fill || "";
+                            const innerHTML = checkmark.innerHTML || "";
+                            
+                            // Green tick
+                            if (color.includes("rgb(76, 175, 80)") || color.includes("green") || classList.includes("success") || classList.includes("accepted")) {
+                                statusIcon = "green_tick";
+                            }
+                            // Yellow exclamation
+                            else if (color.includes("rgb(255, 193, 7)") || color.includes("yellow") || innerHTML.includes("error") || innerHTML.includes("warning")) {
+                                statusIcon = "yellow_exclamation";
+                            }
+                            // Yellow partial tick
+                            else if (innerHTML.includes("schedule") || innerHTML.includes("partial")) {
+                                statusIcon = "yellow_partial_tick";
+                            }
+                            // Other icons (open, bookmark, mail)
+                            else if (innerHTML.includes("open_in_new") || classList.includes("open")) {
+                                statusIcon = "open";
+                            } else if (innerHTML.includes("bookmark") || classList.includes("bookmark")) {
+                                statusIcon = "bookmark";
+                            } else if (innerHTML.includes("mail") || classList.includes("mail")) {
+                                statusIcon = "mail";
+                            }
+                        }
 
                         // Score extraction (e.g. "Score: 20")
                         let score = 0;
@@ -299,8 +336,8 @@ class ProblemListDetector:
                             title: title,
                             url: href || window.location.href,
                             score: score,
-                            solved: isSolved,
-                            status: isSolved ? "Accepted" : "Unsolved"
+                            action_button_text: btnText,
+                            status_icon: statusIcon,
                         });
                     }
 
@@ -316,21 +353,64 @@ class ProblemListDetector:
                         continue
                     seen_ids.add(pid)
 
-                    problems.append(
-                        Problem(
-                            problem_id=pid,
-                            title=raw["title"],
-                            url=raw["url"],
-                            score=raw.get("score", 0),
-                            solved=raw.get("solved", False),
-                            status=raw.get("status", "Unsolved"),
-                        )
+                    # Classify problem by action button text (exact rules)
+                    action_text = raw["action_button_text"]
+                    status_icon = raw["status_icon"]
+                    classification = "UNKNOWN"
+                    solved = False
+
+                    if action_text:
+                        action_lower = action_text.lower().strip()
+                        
+                        # Rule 1: Green tick + "Try Again" = SOLVED
+                        if "try again" in action_lower and status_icon == "green_tick":
+                            classification = "SOLVED"
+                            solved = True
+                        
+                        # Rule 2: Any icon + "Continue" = UNSOLVED_CONTINUE (icon doesn't matter)
+                        elif "continue" in action_lower:
+                            classification = "UNSOLVED_CONTINUE"
+                            solved = False
+                        
+                        # Rule 3: "Solve" button = UNSOLVED_SOLVE (never attempted)
+                        elif "solve" in action_lower:
+                            classification = "UNSOLVED_SOLVE"
+                            solved = False
+                        
+                        # Edge case: "Try Again" without green tick should be treated as SOLVED
+                        # (Hive rules: "Try Again" is only shown after acceptance)
+                        elif "try again" in action_lower:
+                            classification = "SOLVED"
+                            solved = True
+
+                    problem = Problem(
+                        problem_id=pid,
+                        title=raw["title"],
+                        url=raw["url"],
+                        score=raw.get("score", 0),
+                        action_button_text=action_text,
+                        status_icon=status_icon,
+                        classification=classification,
+                        solved=solved,
+                        status="Accepted" if solved else "Unsolved",
                     )
+                    problems.append(problem)
 
                 logger.info(f"✓ Extracted {len(problems)} problems from DOM.")
-                solved_count = sum(1 for p in problems if p.solved)
-                unsolved_count = len(problems) - solved_count
-                logger.info(f"Problem summary: Total={len(problems)}, Solved={solved_count}, Unsolved={unsolved_count}")
+                
+                # Log classification breakdown
+                solved_count = sum(1 for p in problems if p.classification == "SOLVED")
+                continue_count = sum(1 for p in problems if p.classification == "UNSOLVED_CONTINUE")
+                solve_count = sum(1 for p in problems if p.classification == "UNSOLVED_SOLVE")
+                unknown_count = sum(1 for p in problems if p.classification == "UNKNOWN")
+                
+                logger.info(
+                    f"Classification breakdown: "
+                    f"Solved={solved_count}, "
+                    f"Continue={continue_count}, "
+                    f"Solve={solve_count}, "
+                    f"Unknown={unknown_count}"
+                )
 
                 return problems
 
@@ -341,17 +421,67 @@ class ProblemListDetector:
     async def get_unsolved_count(self) -> int:
         """Get count of unsolved problems on current page."""
         problems = await self.fetch_problems()
-        return sum(1 for p in problems if not p.solved)
+        return sum(1 for p in problems if p.classification in ("UNSOLVED_CONTINUE", "UNSOLVED_SOLVE"))
 
     async def get_solved_count(self) -> int:
         """Get count of solved problems on current page."""
         problems = await self.fetch_problems()
-        return sum(1 for p in problems if p.solved)
+        return sum(1 for p in problems if p.classification == "SOLVED")
 
     async def get_unsolved_problems(self) -> List[Problem]:
-        """Get all unsolved Problem objects on current page."""
+        """Get all unsolved Problem objects on current page (UNSOLVED_CONTINUE or UNSOLVED_SOLVE)."""
         problems = await self.fetch_problems()
-        return [p for p in problems if not p.solved]
+        return [p for p in problems if p.classification in ("UNSOLVED_CONTINUE", "UNSOLVED_SOLVE")]
+
+    async def get_continue_problems(self) -> List[Problem]:
+        """Get all UNSOLVED_CONTINUE problems on current page (previously attempted, highest priority)."""
+        problems = await self.fetch_problems()
+        return [p for p in problems if p.classification == "UNSOLVED_CONTINUE"]
+
+    async def get_solve_problems(self) -> List[Problem]:
+        """Get all UNSOLVED_SOLVE problems on current page (never attempted, lower priority)."""
+        problems = await self.fetch_problems()
+        return [p for p in problems if p.classification == "UNSOLVED_SOLVE"]
+
+    def classify_problem(self, problem: Problem) -> str:
+        """
+        Classify a single problem by its action button text and icon.
+        
+        Classification rules (authoritative):
+        - Green tick + "Try Again"              → SOLVED
+        - Any icon + "Continue"                 → UNSOLVED_CONTINUE
+        - "Solve"                               → UNSOLVED_SOLVE
+        - Unknown                               → UNKNOWN
+        
+        Args:
+            problem: Problem object with action_button_text and status_icon
+            
+        Returns:
+            Classification string: "SOLVED", "UNSOLVED_CONTINUE", "UNSOLVED_SOLVE", "UNKNOWN"
+        """
+        if not problem.action_button_text:
+            return "UNKNOWN"
+        
+        action_lower = problem.action_button_text.lower().strip()
+        
+        # Rule 1: Green tick + "Try Again" = SOLVED (only solution to consider solved)
+        if "try again" in action_lower and problem.status_icon == "green_tick":
+            return "SOLVED"
+        
+        # Rule 2: Any icon + "Continue" = UNSOLVED_CONTINUE (ignore icon, Continue means unsolved)
+        elif "continue" in action_lower:
+            return "UNSOLVED_CONTINUE"
+        
+        # Rule 3: "Solve" = UNSOLVED_SOLVE (never attempted)
+        elif "solve" in action_lower:
+            return "UNSOLVED_SOLVE"
+        
+        # Edge case: "Try Again" without icon should be SOLVED (Hive always shows green tick with Try Again)
+        elif "try again" in action_lower:
+            return "SOLVED"
+        
+        else:
+            return "UNKNOWN"
 
     async def navigate_to_problem(self, problem: Problem | str) -> bool:
         """

@@ -120,16 +120,16 @@ class HiveBot:
                 await self._verify_session()
 
                 # Step 4-7: Navigate to contest, discover problems page-by-page,
-                # and solve each page's unsolved problems before advancing.
-                # Solving is done inline per page inside _detect_problem_list().
-                # Returns a WorkflowResult dict indicating success or remaining unresolved problems.
+                # separated from solving. First discover all problems in priority queues,
+                # then solve in order.
+                # Returns a dict indicating success or remaining unresolved problems.
                 workflow_result = await self._detect_problem_list()
 
-                unresolved = workflow_result.get("unresolved", [])
-                if unresolved:
+                unresolved_count = workflow_result.get("unresolved_count", 0)
+                if unresolved_count > 0:
                     logger.warning(
                         f"⚠ Bot workflow incomplete — "
-                        f"{len(unresolved)} problem(s) remain unsolved after all pages processed."
+                        f"{unresolved_count} problem(s) remain unsolved after all pages processed."
                     )
                     return False
                 else:
@@ -333,22 +333,35 @@ class HiveBot:
     # Step 4 — Problem list
     # ------------------------------------------------------------------
 
-    async def _detect_problem_list(self) -> None:
+    async def _detect_problem_list(self) -> dict:
         """
-        Step 4: Contest Navigation, Extension Hierarchy Verification, Continue Contest & Problem Extraction (Phase 2).
+        Step 4: Contest Navigation, Extension Hierarchy Verification, and Problem Discovery (Phase 2).
 
-        Architecture (page-by-page):
+        NEW ARCHITECTURE: Separate Discovery from Solving
+        ================================================
+        
+        DISCOVERY PHASE:
         1. Navigate to contest + click Continue Contest
-        2. For each page:
-           a. Fetch DOM problems
-           b. Reconcile with bot state — Hive DOM is authoritative:
-              - "Try Again"      → Hive-solved  → update state only
-              - "Solve"/"Continue" → Hive-unsolved → always queue
-              - Hive-unsolved + bot completed_problems → state drift warning + requeue
-           c. Build actionable queue (only Hive-unsolved problems for THIS page)
-           d. Solve each problem in order before advancing
-           e. Advance to next page (with advancement verification)
-        3. Terminate when: no Next button, advancement verification fails, or safety cap hit
+        2. FOR EACH PAGE (page 0 → last page):
+           a. Fetch all problems from DOM
+           b. Classify each problem (SOLVED, UNSOLVED_CONTINUE, UNSOLVED_SOLVE, UNKNOWN)
+           c. Add UNSOLVED_CONTINUE problems to continue_queue (preserve order)
+           d. Add UNSOLVED_SOLVE problems to solve_queue (preserve order)
+           e. Advance to next page
+        3. Discovery complete when: no Next button, advancement fails, or safety cap hit
+        
+        SOLVING PHASE:
+        1. Process continue_queue first (all Continue problems in discovery order)
+        2. Then process solve_queue (all Solve problems in discovery order)
+        3. Hive DOM is authoritative — ignore state.json for current state (use only for drift detection)
+        
+        FINAL RECONCILIATION:
+        1. Re-read all pages from problem list
+        2. Count: Total, Solved, Unsolved Continue, Unsolved Solve, Unknown
+        3. Report SUCCESS if unsolved = 0, else INCOMPLETE
+        
+        Returns:
+            dict with: pages_processed, pagination_complete, continue_queue, solve_queue, unresolved
         """
         with LogContext("Step 4: Contest Navigation & Problem Discovery"):
             try:
@@ -393,101 +406,93 @@ class HiveBot:
                 self.state_manager.mark_on_problem_list(True)
                 self.state_manager.state.session.workflow_state = WorkflowState.ON_PROBLEM_LIST
 
+                # ================================================================
+                # SOLVE PHASE: Process each page inline in DOM top-to-bottom order.
+                #
+                # Why inline instead of discover-then-solve?
+                # The old two-phase approach built continue_queue + solve_queue
+                # across ALL pages first, then concatenated them.  That caused
+                # page-8 Continue problems to be solved before page-1 Solve
+                # problems — a visible ordering inversion.
+                #
+                # New approach: for each page, fetch problems in DOM order, solve
+                # the unsolved ones (Solve / Continue) in that exact order, then
+                # advance.  SOLVED (green tick + Try Again) problems are skipped.
+                # ================================================================
+                logger.info("\n" + "="*70)
+                logger.info("SOLVE PHASE: Solving problems page by page in DOM order")
+                logger.info("="*70)
 
-                # ----------------------------------------------------------------
-                # Page-by-page loop:
-                # Fetch → Reconcile → Queue → Solve → Advance → Repeat
-                # ----------------------------------------------------------------
-                MAX_PAGES = 50  # Safety cap — prevents runaway loops
+                total_solved_this_run = 0
+                total_attempted_this_run = 0
+                discovered_problems: Dict[str, Problem] = {}   # all known problems
+
+                MAX_PAGES = 50  # Safety cap
                 page_number = 0
 
                 while page_number < MAX_PAGES:
                     if self._shutdown_requested:
-                        logger.info("Shutdown requested: stopping page-by-page loop.")
+                        logger.info("Shutdown requested: stopping solve loop.")
                         break
 
-                    logger.info(f"Processing page {page_number + 1} of problem list...")
+                    logger.info(f"\n[Page {page_number + 1}] Fetching problems in DOM order...")
                     problems = await detector.fetch_problems()
 
+
                     if not problems:
-                        logger.warning(f"No problems extracted from DOM on page {page_number + 1}.")
+                        logger.warning(
+                            f"[Page {page_number + 1}] No problems extracted from DOM. "
+                            "Terminating pagination."
+                        )
                         break
 
-                    # ---- Reconcile: Hive DOM is authoritative ----
-                    # Queue invariant: only Hive-unsolved problems enter the queue.
-                    # completed_problems is a historical crash-recovery log — not a skip list.
-                    page_queue: list = []  # list of (problem_id, problem_url)
-
-                    hive_solved_count = 0
-                    hive_unsolved_count = 0
-                    state_drift_count = 0
-
+                    # Register all discovered problems (for reconciliation tracking)
                     for p in problems:
-                        if p.solved:
-                            # Hive confirmed solved ("Try Again") — update state, do NOT queue
-                            hive_solved_count += 1
-                            self.state_manager.add_problem(p.problem_id, p.title)
-                            self.state_manager.mark_problem_solved(p.problem_id)
-                            continue
+                        discovered_problems[p.problem_id] = p
 
-                        # Hive says unsolved ("Solve" or "Continue" button)
-                        hive_unsolved_count += 1
-
-                        if p.problem_id in self.state_manager.state.completed_problems:
-                            # STATE DRIFT: bot thinks done but Hive contradicts
-                            state_drift_count += 1
-                            logger.warning(
-                                f"⚠ State drift detected for '{p.problem_id}': "
-                                f"bot marked completed but Hive shows '{p.status}' button. "
-                                f"Re-queuing — Hive DOM is authoritative."
-                            )
-                            # Remove from completed so solver re-attempts it
-                            self.state_manager.state.completed_problems.remove(p.problem_id)
-
-                        # Queue this problem — Hive says it is unsolved
-                        self.state_manager.add_problem(p.problem_id, p.title)
-                        if p.problem_id not in self.state_manager.state.problems_queue:
-                            self.state_manager.state.problems_queue.append(p.problem_id)
-                        page_queue.append((p.problem_id, p.url))
+                    already_solved = sum(1 for p in problems if p.classification == "SOLVED")
+                    unsolved_list  = [
+                        p for p in problems
+                        if p.classification in ("UNSOLVED_CONTINUE", "UNSOLVED_SOLVE")
+                    ]
 
                     logger.info(
-                        f"Page {page_number + 1} reconciliation: "
-                        f"Discovered={len(problems)}, "
-                        f"Hive-solved={hive_solved_count}, "
-                        f"Hive-unsolved={hive_unsolved_count}, "
-                        f"State-drift-requeued={state_drift_count}, "
-                        f"Actionable={len(page_queue)}"
+                        f"[Page {page_number + 1}] {len(problems)} total: "
+                        f"{already_solved} already-solved (skipping), "
+                        f"{len(unsolved_list)} to attempt"
                     )
-                    self.state_manager.save_state()
 
-                    # ---- Solve this page's queue before advancing ----
-                    if page_queue:
-                        logger.info(f"Solving {len(page_queue)} problem(s) on page {page_number + 1}...")
-                        for problem_id, problem_url in page_queue:
-                            if self._shutdown_requested:
-                                logger.info("Shutdown requested: stopping solve loop.")
-                                break
-                            try:
-                                await self.solve_problem(
-                                    problem_id=problem_id,
-                                    # DOM-extracted URL takes priority; slug fallback in solve_problem()
-                                    problem_url=problem_url if problem_url else None,
-                                )
-                            except Exception as e:
-                                logger.error(f"Error solving problem '{problem_id}': {e}")
-                                self.state_manager.save_state()
-                    else:
-                        logger.info(f"No actionable problems on page {page_number + 1} — advancing.")
+                    # Solve unsolved problems in exact DOM order (top → bottom)
+                    for pos, problem in enumerate(unsolved_list, 1):
+                        if self._shutdown_requested:
+                            logger.info("Shutdown requested: stopping solve loop mid-page.")
+                            break
+
+                        kind = "Continue" if problem.classification == "UNSOLVED_CONTINUE" else "Solve"
+                        logger.info(
+                            f"\n[Page {page_number + 1}, #{pos}/{len(unsolved_list)}] "
+                            f"{problem.problem_id} ({kind})"
+                        )
+                        total_attempted_this_run += 1
+                        try:
+                            result = await self.solve_problem(
+                                problem_id=problem.problem_id,
+                                problem_url=problem.url,
+                            )
+                            if result:
+                                total_solved_this_run += 1
+                        except Exception as e:
+                            logger.error(f"Error solving '{problem.problem_id}': {e}")
+                            self.state_manager.save_state()
 
                     if self._shutdown_requested:
                         break
 
-                    # ---- Advance to next page (with termination verification) ----
+                    # Advance to next page
                     advanced = await detector.go_to_next_page()
                     if not advanced:
                         logger.info(
-                            f"Pagination complete after page {page_number + 1} "
-                            "(Next unavailable or page did not advance)."
+                            f"[Page {page_number + 1}] No next page — pagination complete."
                         )
                         break
 
@@ -495,58 +500,147 @@ class HiveBot:
 
                 if page_number >= MAX_PAGES:
                     logger.warning(
-                        f"Pagination safety cap ({MAX_PAGES} pages) reached. "
-                        "Terminating loop to prevent runaway execution."
+                        f"Safety cap ({MAX_PAGES} pages) reached. "
+                        "Terminating to prevent runaway execution."
                     )
 
-                # ----------------------------------------------------------------
-                # FINAL RECONCILIATION
-                # Pagination complete ≠ solving complete.
-                # Determine actual unresolved problems from authoritative bot state
-                # (built from Hive DOM each page via mark_problem_solved / mark_problem_failed).
-                # ----------------------------------------------------------------
-                unresolved_ids: list = [
-                    pid
-                    for pid in self.state_manager.state.failed_problems
-                    if pid not in self.state_manager.state.completed_problems
-                ]
+                logger.info(
+                    f"\n[Solve Phase] Complete: {page_number + 1} page(s) processed. "
+                    f"Attempted={total_attempted_this_run}, Solved={total_solved_this_run}"
+                )
 
-                total_discovered = len(self.state_manager.state.progress)
-                total_solved = len(self.state_manager.state.completed_problems)
+                if self._shutdown_requested:
+                    logger.info("Shutdown requested: skipping final reconciliation.")
+                    return {
+                        "pages_processed": page_number + 1,
+                        "pagination_complete": False,
+                        "total_attempted": total_attempted_this_run,
+                        "total_solved": total_solved_this_run,
+                        "unresolved": [],
+                    }
 
-                if unresolved_ids:
-                    logger.warning(
-                        f"\n{'='*60}\n"
-                        f"FINAL RECONCILIATION — Pagination complete, last page reached.\n"
-                        f"{'='*60}\n"
-                        f"  Total discovered : {total_discovered}\n"
-                        f"  Bot-solved        : {total_solved}\n"
-                        f"  Unresolved        : {len(unresolved_ids)}\n"
-                        f"\nUnresolved problem IDs:"
-                    )
-                    for pid in unresolved_ids:
-                        logger.warning(f"  ✗ {pid}")
-                    logger.error(
-                        f"✗ Bot workflow INCOMPLETE — {len(unresolved_ids)} problem(s) remain unsolved."
-                    )
+
+
+                # ================================================================
+                # FINAL RECONCILIATION: Re-read all pages to verify all solved
+                # ================================================================
+                logger.info("\n" + "="*70)
+                logger.info("FINAL RECONCILIATION: Re-reading all pages to verify completion")
+                logger.info("="*70)
+
+                # Navigate back to first page
+                contest_url_for_recon = self.config.get("hive.contest_url") or self.config.get("auth.login_url")
+                if contest_url_for_recon:
+                    logger.info("Navigating back to problem list for final reconciliation...")
+                    await detector.navigate_to_contest(contest_url_for_recon)
+                    if not await detector.is_on_problem_list_page():
+                        await detector.click_continue_contest()
+
+                reconciliation_data = {
+                    "total_discovered": 0,
+                    "reconciled_solved": 0,
+                    "reconciled_continue": 0,
+                    "reconciled_solve": 0,
+                    "reconciled_unknown": 0,
+                    "unresolved_problems": [],
+                }
+
+                recon_page = 0
+                while recon_page < MAX_PAGES:
+                    if self._shutdown_requested:
+                        logger.info("Shutdown requested: stopping reconciliation.")
+                        break
+
+                    recon_problems = await detector.fetch_problems()
+                    if not recon_problems:
+                        logger.info(f"[Reconciliation] No problems on page {recon_page + 1}. Reconciliation complete.")
+                        break
+
+                    logger.info(f"[Reconciliation] Page {recon_page + 1}: Found {len(recon_problems)} problems")
+
+                    for p in recon_problems:
+                        reconciliation_data["total_discovered"] += 1
+
+                        if p.classification == "SOLVED":
+                            reconciliation_data["reconciled_solved"] += 1
+                            logger.debug(f"  ✓ {p.problem_id}: SOLVED")
+                        elif p.classification == "UNSOLVED_CONTINUE":
+                            reconciliation_data["reconciled_continue"] += 1
+                            reconciliation_data["unresolved_problems"].append({
+                                "problem_id": p.problem_id,
+                                "title": p.title,
+                                "type": "CONTINUE",
+                            })
+                            logger.warning(f"  ⟳ {p.problem_id}: UNSOLVED_CONTINUE (not resolved)")
+                        elif p.classification == "UNSOLVED_SOLVE":
+                            reconciliation_data["reconciled_solve"] += 1
+                            reconciliation_data["unresolved_problems"].append({
+                                "problem_id": p.problem_id,
+                                "title": p.title,
+                                "type": "SOLVE",
+                            })
+                            logger.warning(f"  ◯ {p.problem_id}: UNSOLVED_SOLVE (not resolved)")
+                        else:
+                            reconciliation_data["reconciled_unknown"] += 1
+                            logger.warning(f"  ? {p.problem_id}: UNKNOWN")
+
+                    if self._shutdown_requested:
+                        break
+
+                    advanced = await detector.go_to_next_page()
+                    if not advanced:
+                        logger.info(f"[Reconciliation] Complete after page {recon_page + 1}.")
+                        break
+
+                    recon_page += 1
+
+                total_unsolved = (
+                    reconciliation_data["reconciled_continue"] +
+                    reconciliation_data["reconciled_solve"]
+                )
+
+                logger.info(
+                    f"\n{'='*70}\n"
+                    f"FINAL RECONCILIATION REPORT\n"
+                    f"{'='*70}\n"
+                    f"  Total discovered        : {reconciliation_data['total_discovered']}\n"
+                    f"  Hive-solved             : {reconciliation_data['reconciled_solved']}\n"
+                    f"  Hive-unsolved (Continue): {reconciliation_data['reconciled_continue']}\n"
+                    f"  Hive-unsolved (Solve)   : {reconciliation_data['reconciled_solve']}\n"
+                    f"  Unknown                 : {reconciliation_data['reconciled_unknown']}\n"
+                    f"  Total unresolved        : {total_unsolved}"
+                )
+
+                if reconciliation_data["unresolved_problems"]:
+                    logger.error("\nUnresolved problems:")
+                    for prob in reconciliation_data["unresolved_problems"]:
+                        logger.error(f"  ✗ {prob['problem_id']} ({prob['type']}): {prob['title']}")
+
+                if total_unsolved == 0:
+                    logger.info("\n✓ FINAL RECONCILIATION: ALL PROBLEMS RESOLVED — Bot workflow SUCCESS")
+                    success = True
                 else:
-                    logger.info(
-                        f"\n{'='*60}\n"
-                        f"FINAL RECONCILIATION — All discovered problems solved.\n"
-                        f"{'='*60}\n"
-                        f"  Pages processed : {page_number + 1}\n"
-                        f"  Solved          : {total_solved}\n"
+                    logger.error(
+                        f"\n✗ FINAL RECONCILIATION: {total_unsolved} problem(s) remain unresolved — "
+                        f"Bot workflow INCOMPLETE"
                     )
+                    success = False
+
+                logger.info("="*70 + "\n")
 
                 self.state_manager.save_state()
 
                 return {
                     "pages_processed": page_number + 1,
                     "pagination_complete": True,
-                    "hive_solved": total_solved,
-                    "unresolved": unresolved_ids,
-                    "failed_count": len(unresolved_ids),
+                    "total_attempted": total_attempted_this_run,
+                    "total_solved": total_solved_this_run,
+                    "reconciliation": reconciliation_data,
+                    "success": success,
+                    "unresolved": reconciliation_data["unresolved_problems"],
+                    "unresolved_count": total_unsolved,
                 }
+
 
             except HiveBotError:
                 raise
