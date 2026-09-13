@@ -484,6 +484,9 @@ class AuthManager:
                     logger.debug(f"Still on login page ({current_url}) - session not authenticated")
                     return False
 
+                # Wait a moment for token to be persisted to localStorage
+                await asyncio.sleep(1)
+
                 # 2. Primary check: jwtToken in localStorage (Hive SPA mechanism)
                 # This is the single most reliable indicator on Hive
                 try:
@@ -625,4 +628,5 @@ class AuthManager:
             except Exception as e:
                 logger.error(f"Login workflow failed: {e}")
                 raise AuthenticationError(f"Login failed: {e}") from e
+
 
