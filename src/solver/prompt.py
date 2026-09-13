@@ -16,7 +16,7 @@ class PromptBuilder:
 
         # System / context instruction
         parts.append(
-            f"You are an expert competitive programmer. Write a complete, optimal, and correct solution in {request.language} "
+            f"You are an expert competitive programmer. Write a complete, CORRECT, and SIMPLE solution in {request.language} "
             f"that solves the following problem under all given constraints."
         )
         parts.append("\n--- PROBLEM DETAILS ---")
@@ -59,10 +59,13 @@ class PromptBuilder:
         parts.append("\n--- CODING REQUIREMENTS ---")
         parts.append(f"1. Provide a COMPLETE, standalone, and runnable {request.language} program.")
         parts.append("2. Read input from standard input (stdin) and print output to standard output (stdout).")
-        parts.append("3. Use fast I/O where appropriate.")
+        parts.append("3. SIMPLICITY - Write straightforward, easy-to-understand code. Avoid complex patterns.")
         parts.append("4. IMPORTANT: Do NOT include any conversational introduction, explanations, or analysis.")
         parts.append("5. Output ONLY the code inside standard markdown fences (``` ... ```) or as pure code.")
         parts.append("6. Match the EXACT output format and casing specified in Output Format and Sample Cases (e.g., lowercase 'true'/'false' vs uppercase 'YES'/'NO').")
-        parts.append("7. Ensure strict mathematical correctness and handle edge cases (e.g., target sum = 0, negative numbers, minimum constraints, distinct partition boundaries).")
+        parts.append("7. For Java: Use basic arrays, ArrayList, HashMap. No streams, lambdas, or advanced features.")
+        parts.append("8. Ensure strict mathematical correctness and handle edge cases (e.g., target sum = 0, negative numbers, minimum constraints, distinct partition boundaries).")
 
         return "\n".join(parts)
+
+
