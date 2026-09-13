@@ -64,9 +64,10 @@ class BaseAIProvider(ABC):
 class GroqProvider(BaseAIProvider):
     """Groq API provider implementation (OpenAI-compatible chat completions API)."""
 
-    def __init__(self, api_key: str, model: str, timeout_seconds: float = 60.0):
+    def __init__(self, api_key: str, model: str, timeout_seconds: float = 60.0, max_tokens: int = 2048):
         super().__init__(name="groq", api_key=api_key, model=model, timeout_seconds=timeout_seconds)
         self.endpoint = "https://api.groq.com/openai/v1/chat/completions"
+        self.max_tokens = max_tokens
 
     async def generate_code(self, prompt: str) -> str:
         headers = {
@@ -80,28 +81,49 @@ class GroqProvider(BaseAIProvider):
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.2,
+            "max_tokens": self.max_tokens,
         }
 
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                response = await client.post(self.endpoint, headers=headers, json=payload)
+        max_rate_limit_retries = 3
+        for attempt_idx in range(max_rate_limit_retries):
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                    response = await client.post(self.endpoint, headers=headers, json=payload)
 
-            if response.status_code == 200:
-                data = response.json()
-                choices = data.get("choices", [])
-                if not choices:
-                    raise ProviderError(ProviderErrorKind.INVALID_RESPONSE, self.name, "No choices in response", 200)
-                content = choices[0].get("message", {}).get("content", "")
-                if not content:
-                    raise ProviderError(ProviderErrorKind.INVALID_RESPONSE, self.name, "Empty message content", 200)
-                return content
+                if response.status_code == 200:
+                    data = response.json()
+                    choices = data.get("choices", [])
+                    if not choices:
+                        raise ProviderError(ProviderErrorKind.INVALID_RESPONSE, self.name, "No choices in response", 200)
+                    content = choices[0].get("message", {}).get("content", "")
+                    if not content:
+                        raise ProviderError(ProviderErrorKind.INVALID_RESPONSE, self.name, "Empty message content", 200)
+                    return content
 
-            self._handle_http_error(response.status_code, response.text)
+                if response.status_code == 429 and attempt_idx < max_rate_limit_retries - 1:
+                    retry_after = response.headers.get("retry-after")
+                    try:
+                        wait_seconds = float(retry_after) if retry_after else (5.0 * (attempt_idx + 1))
+                    except (ValueError, TypeError):
+                        wait_seconds = 5.0 * (attempt_idx + 1)
+                    logger.warning(
+                        f"Groq rate limit hit (429). Backing off for {wait_seconds:.1f}s before retry ({attempt_idx + 1}/{max_rate_limit_retries})..."
+                    )
+                    await asyncio.sleep(wait_seconds)
+                    continue
 
-        except httpx.TimeoutException as e:
-            raise ProviderError(ProviderErrorKind.TIMEOUT, self.name, f"Request timed out: {e}") from e
-        except httpx.RequestError as e:
-            raise ProviderError(ProviderErrorKind.UNAVAILABLE, self.name, f"Network connection error: {e}") from e
+                self._handle_http_error(response.status_code, response.text)
+
+            except httpx.TimeoutException as e:
+                if attempt_idx < max_rate_limit_retries - 1:
+                    await asyncio.sleep(2)
+                    continue
+                raise ProviderError(ProviderErrorKind.TIMEOUT, self.name, f"Request timed out: {e}") from e
+            except httpx.RequestError as e:
+                if attempt_idx < max_rate_limit_retries - 1:
+                    await asyncio.sleep(2)
+                    continue
+                raise ProviderError(ProviderErrorKind.UNAVAILABLE, self.name, f"Network connection error: {e}") from e
 
     def _handle_http_error(self, status: int, text: str) -> None:
         masked_text = self._mask_secrets(text)
@@ -119,9 +141,10 @@ class GroqProvider(BaseAIProvider):
 class GeminiProvider(BaseAIProvider):
     """Google Gemini API provider implementation."""
 
-    def __init__(self, api_key: str, model: str, timeout_seconds: float = 60.0):
+    def __init__(self, api_key: str, model: str, timeout_seconds: float = 60.0, max_tokens: int = 2048):
         super().__init__(name="gemini", api_key=api_key, model=model, timeout_seconds=timeout_seconds)
         self.endpoint_template = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        self.max_tokens = max_tokens
 
     async def generate_code(self, prompt: str) -> str:
         url = self.endpoint_template.format(model=self.model)
@@ -137,29 +160,46 @@ class GeminiProvider(BaseAIProvider):
             ],
             "generationConfig": {
                 "temperature": 0.2,
+                "maxOutputTokens": self.max_tokens,
             }
         }
 
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                response = await client.post(url, headers=headers, json=payload)
+        max_rate_limit_retries = 3
+        for attempt_idx in range(max_rate_limit_retries):
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                    response = await client.post(url, headers=headers, json=payload)
 
-            if response.status_code == 200:
-                data = response.json()
-                candidates = data.get("candidates", [])
-                if not candidates:
-                    raise ProviderError(ProviderErrorKind.INVALID_RESPONSE, self.name, "No candidates in response", 200)
-                parts = candidates[0].get("content", {}).get("parts", [])
-                if not parts or not parts[0].get("text"):
-                    raise ProviderError(ProviderErrorKind.INVALID_RESPONSE, self.name, "Empty candidate parts", 200)
-                return parts[0]["text"]
+                if response.status_code == 200:
+                    data = response.json()
+                    candidates = data.get("candidates", [])
+                    if not candidates:
+                        raise ProviderError(ProviderErrorKind.INVALID_RESPONSE, self.name, "No candidates in response", 200)
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    if not parts or not parts[0].get("text"):
+                        raise ProviderError(ProviderErrorKind.INVALID_RESPONSE, self.name, "Empty candidate parts", 200)
+                    return parts[0]["text"]
 
-            self._handle_http_error(response.status_code, response.text)
+                if response.status_code == 429 and attempt_idx < max_rate_limit_retries - 1:
+                    wait_seconds = 5.0 * (attempt_idx + 1)
+                    logger.warning(
+                        f"Gemini rate limit hit (429). Backing off for {wait_seconds:.1f}s before retry ({attempt_idx + 1}/{max_rate_limit_retries})..."
+                    )
+                    await asyncio.sleep(wait_seconds)
+                    continue
 
-        except httpx.TimeoutException as e:
-            raise ProviderError(ProviderErrorKind.TIMEOUT, self.name, f"Request timed out: {e}") from e
-        except httpx.RequestError as e:
-            raise ProviderError(ProviderErrorKind.UNAVAILABLE, self.name, f"Network connection error: {e}") from e
+                self._handle_http_error(response.status_code, response.text)
+
+            except httpx.TimeoutException as e:
+                if attempt_idx < max_rate_limit_retries - 1:
+                    await asyncio.sleep(2)
+                    continue
+                raise ProviderError(ProviderErrorKind.TIMEOUT, self.name, f"Request timed out: {e}") from e
+            except httpx.RequestError as e:
+                if attempt_idx < max_rate_limit_retries - 1:
+                    await asyncio.sleep(2)
+                    continue
+                raise ProviderError(ProviderErrorKind.UNAVAILABLE, self.name, f"Network connection error: {e}") from e
 
     def _handle_http_error(self, status: int, text: str) -> None:
         masked_text = self._mask_secrets(text)

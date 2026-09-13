@@ -11,6 +11,7 @@ Coordinates all components:
 """
 
 import asyncio
+import random
 from pathlib import Path
 from typing import Optional
 
@@ -265,33 +266,8 @@ class HiveBot:
 
                 logger.info("✓ Login successful")
 
-                # Check if logged-in account matches .env credentials
-                # If mismatch, it means profile has old account cached - user must switch
-                try:
-                    cached_username = self.state_manager.state.session.credentials.username
-                    if (cached_username and 
-                        cached_username.lower() != credentials.username.lower()):
-                        logger.error(
-                            f"❌ ACCOUNT MISMATCH - Profile has old account cached:\n"
-                            f"   .env says:     {credentials.username}\n"
-                            f"   Profile has:   {cached_username}\n"
-                            f"\n"
-                            f"   To switch accounts:\n"
-                            f"   1. Update HIVE_USERNAME and HIVE_PASSWORD in .env\n"
-                            f"   2. Clear the old profile:\n"
-                            f"      PowerShell: Remove-Item -Recurse -Force '$env:USERPROFILE\\.hive_bot_profile'\n"
-                            f"      Or run: .\\switch_account.ps1\n"
-                            f"   3. Run bot again - it will create fresh profile with new account\n"
-                        )
-                        raise AuthenticationError(
-                            f"Account mismatch: .env has {credentials.username} "
-                            f"but profile cached {cached_username}"
-                        )
-                except AuthenticationError:
-                    raise
-                except Exception:
-                    pass  # Profile may not have cached credentials yet
-
+                # Always update session with current .env credentials (multi-account support)
+                # This allows seamless account switching by just updating .env
                 state_creds = StateCredentials(
                     username=credentials.username,
                     login_url=credentials.login_url,
@@ -759,7 +735,7 @@ class HiveBot:
 
             page = await self.browser_manager.get_page()
 
-            # Navigate to problem page if needed
+            # Navigate to problem page if needed (with up to 3 retries and page reload)
             if not problem_url:
                 contest_url = (self.config.get("hive.contest_url") or "").rstrip("/")
                 if contest_url:
@@ -767,16 +743,32 @@ class HiveBot:
                 else:
                     problem_url = f"https://hive.smartinterviews.in/contests/default/problems/{problem_id}"
 
-            if page.url != problem_url:
-                logger.info(f"Navigating to problem page: {problem_url}")
-                await page.goto(problem_url, wait_until="networkidle")
-                await asyncio.sleep(2)
+            nav_success = False
+            problem_detail = None
+            for nav_try in range(3):
+                try:
+                    if page.url != problem_url or nav_try > 0:
+                        logger.info(f"Navigating to problem page (try {nav_try+1}/3): {problem_url}")
+                        await page.goto(problem_url, wait_until="networkidle")
+                        await asyncio.sleep(2)
 
-            # Step 3: Extract Problem Specification
-            logger.info("Extracting problem details from DOM...")
-            problem_detail = await ProblemDetailParser.extract_from_page(page, problem_id=problem_id)
-            if problem_detail.title:
-                progress.title = problem_detail.title
+                    logger.info("Extracting problem details from DOM...")
+                    problem_detail = await ProblemDetailParser.extract_from_page(page, problem_id=problem_id)
+                    if problem_detail.title:
+                        progress.title = problem_detail.title
+                    nav_success = True
+                    break
+                except Exception as extract_err:
+                    logger.warning(f"Problem detail extraction attempt {nav_try+1}/3 failed for '{problem_id}': {extract_err}")
+                    if nav_try < 2:
+                        await asyncio.sleep(3)
+                        try:
+                            await page.reload(wait_until="domcontentloaded")
+                        except Exception:
+                            pass
+
+            if not nav_success or problem_detail is None:
+                raise HiveBotError(f"Failed to navigate/extract problem details for '{problem_id}' after 3 attempts.")
 
             # Step 4: Select Target Language
             # Read from PROBLEM_LANGUAGE in .env (user-configurable), fallback to DEFAULT_LANGUAGE
@@ -817,6 +809,7 @@ class HiveBot:
                 if self._shutdown_requested:
                     logger.info(f"Shutdown requested: stopping solve loop for '{problem_id}' at clean attempt boundary.")
                     break
+
                 # Generate new code only if not already generated for this attempt (preserves AI calls across platform retries)
                 if not current_code:
                     logger.info(f"Problem '{problem_id}': Generating code for attempt {attempt}/{max_attempts}...")
@@ -838,12 +831,56 @@ class HiveBot:
                         previous_verdict=previous_verdict,
                     )
 
-                    # Generate code via AI Solver Engine
-                    solution_response = await engine.solve(request)
-                    current_code = solution_response.code
+                    # Generate code via AI Solver Engine with automatic retry for transient API failures
+                    ai_retries = 0
+                    max_ai_retries = 3
+                    while ai_retries < max_ai_retries:
+                        ai_retries += 1
+                        try:
+                            solution_response = await engine.solve(request)
+                            current_code = solution_response.code
+                            break
+                        except Exception as ai_err:
+                            if ai_retries < max_ai_retries:
+                                wait_s = 5 * ai_retries
+                                logger.warning(
+                                    f"AI generation failed on attempt {attempt}/{max_attempts} for '{problem_id}': {ai_err}. "
+                                    f"Retrying generation in {wait_s}s ({ai_retries}/{max_ai_retries})..."
+                                )
+                                await asyncio.sleep(wait_s)
+                            else:
+                                logger.error(
+                                    f"AI generation failed after {max_ai_retries} tries on attempt {attempt}/{max_attempts} for '{problem_id}': {ai_err}"
+                                )
+
+                    if not current_code:
+                        # AI failed to generate code on this attempt. Do not abort solve_problem!
+                        logger.warning(
+                            f"Could not generate code for attempt {attempt}/{max_attempts}. Proceeding to next attempt..."
+                        )
+                        progress.attempts = attempt
+                        progress.last_error = "AI code generation failed across retries"
+                        if attempt >= max_attempts:
+                            self.state_manager.mark_problem_failed(
+                                problem_id,
+                                reason=f"AI generation failed across all {max_attempts} attempts."
+                            )
+                            if problem_id in self.state_manager.state.problems_queue:
+                                self.state_manager.state.problems_queue.remove(problem_id)
+                            self.state_manager.save_state()
+                            return False
+                        attempt += 1
+                        self.state_manager.save_state()
+                        await asyncio.sleep(5)
+                        continue
 
                     # Inject code into editor with read-back verification
                     await editor_adapter.set_code(current_code)
+
+                    # Human-like delay: reviewing code (8-15 sec)
+                    review_delay = 8 + random.uniform(0, 7)
+                    logger.info(f"[Human timing] Code review: {review_delay:.1f}s")
+                    await asyncio.sleep(review_delay)
 
                     # Optional sample run
                     if run_sample_first:
@@ -898,20 +935,31 @@ class HiveBot:
                     self.state_manager.save_state()  # Checkpoint state
 
                     if platform_retries >= max_platform_retries:
-                        logger.error(
-                            f"Exceeded max platform retries ({max_platform_retries}) for problem '{problem_id}'."
+                        logger.warning(
+                            f"Exceeded max platform retries ({max_platform_retries}) on attempt {attempt} for '{problem_id}'. "
+                            f"Reloading problem page and proceeding to next attempt..."
                         )
-                        return False
+                        try:
+                            await page.reload(wait_until="domcontentloaded")
+                            await asyncio.sleep(2)
+                        except Exception:
+                            pass
+                        current_code = None
+                        platform_retries = 0
+                        if attempt >= max_attempts:
+                            return False
+                        attempt += 1
+                        continue
 
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(2)
                     continue
 
                 # ----------------------------------------------------
-                # CASE C: Evaluated Code Failure (Wrong Answer, Compile Error, TLE, etc.)
-                # Rule: BURN an AI attempt and provide diagnostics to next prompt!
+                # CASE C: Evaluated Code Failure (Wrong Answer, Compile Error, TLE, Partially Accepted)
+                # Rule: BURN an AI attempt, pass error diagnostics to next prompt, and CONTINUE TO NEXT ATTEMPT!
                 # ----------------------------------------------------
                 logger.warning(
-                    f"Attempt {attempt} evaluated as {sub_result.verdict.value}: {sub_result.diagnostic_message}"
+                    f"Attempt {attempt}/{max_attempts} evaluated as {sub_result.verdict.value}: {sub_result.diagnostic_message}"
                 )
                 progress.attempts = attempt
                 progress.last_error = sub_result.diagnostic_message
@@ -936,6 +984,7 @@ class HiveBot:
 
                 attempt += 1
                 self.state_manager.save_state()  # Atomic checkpoint before next attempt
+                logger.info(f"Advancing to attempt {attempt}/{max_attempts} for problem '{problem_id}'...")
 
             return False
 
@@ -1042,4 +1091,7 @@ class HiveBot:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.shutdown()
         return False
+
+
+
 

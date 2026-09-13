@@ -323,7 +323,7 @@ class ProblemDetailParser:
         Extract problem details directly from an active Playwright page.
         """
         try:
-            desc_el = await page.wait_for_selector(PROBLEM_DETAIL_DESCRIPTION, timeout=10000)
+            desc_el = await page.wait_for_selector(PROBLEM_DETAIL_DESCRIPTION, timeout=25000)
             if not desc_el:
                 raise ProblemExtractionError(f"Description container not found: {PROBLEM_DETAIL_DESCRIPTION}")
         except PlaywrightTimeoutError as e:

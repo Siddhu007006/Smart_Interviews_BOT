@@ -68,6 +68,14 @@ class AISolverEngine:
                 )
                 continue
 
+            # Skip dummy placeholder keys
+            clean_key = api_key.strip()
+            if clean_key in ("AIza...", "your_key_here", "TODO", "default", "YOUR_API_KEY") or len(clean_key) < 15:
+                logger.info(
+                    f"API key for provider '{provider_name}' appears to be a placeholder ('{clean_key[:10]}...'); skipping from active chain."
+                )
+                continue
+
             # Get model ID — if API key is set but model is missing, fail loudly.
             # (Misconfiguration: developer added key but forgot model env var.)
             try:
@@ -80,11 +88,12 @@ class AISolverEngine:
                 )
 
             timeout = float(self.config.get("solver.timeout_seconds", 60.0))
+            max_tokens = int(self.config.get("solver.max_tokens", 2048))
 
             if provider_name == "groq":
-                initialized.append(GroqProvider(api_key=api_key, model=model, timeout_seconds=timeout))
+                initialized.append(GroqProvider(api_key=api_key, model=model, timeout_seconds=timeout, max_tokens=max_tokens))
             elif provider_name == "gemini":
-                initialized.append(GeminiProvider(api_key=api_key, model=model, timeout_seconds=timeout))
+                initialized.append(GeminiProvider(api_key=api_key, model=model, timeout_seconds=timeout, max_tokens=max_tokens))
             else:
                 logger.warning(f"Unknown provider name '{provider_name}' in fallback chain")
 

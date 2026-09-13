@@ -5,15 +5,55 @@ Enforces deterministic boundary cleaning:
 1. Strips markdown code fences (```cpp, ```python, etc.)
 2. Strips conversational prose wrappers
 3. Verifies non-empty and basic structural sanity
+4. Normalizes Unicode characters to ASCII-safe equivalents
 Does NOT pretend to be a full compiler.
 """
 
 import re
+import unicodedata
 from src.utils.errors import SolverError
 
 
 class SolutionValidator:
     """Cleans and validates LLM-generated code solutions."""
+
+    @staticmethod
+    def _normalize_unicode(text: str) -> str:
+        """
+        Normalize problematic Unicode characters to ASCII-safe equivalents.
+        
+        LLMs often generate smart quotes, dashes, and other fancy Unicode characters
+        that cause encoding errors in compilers (especially Java with US-ASCII encoding).
+        
+        This method converts:
+        - Smart quotes (" ") to straight quotes (")
+        - Smart apostrophes (') to straight apostrophes (')
+        - Em/en dashes (—, –) to hyphens (-)
+        - Other Unicode punctuation to ASCII equivalents
+        """
+        # Replace common smart quote variants
+        replacements = {
+            '\u201C': '"',  # Left double quotation mark
+            '\u201D': '"',  # Right double quotation mark
+            '\u2018': "'",  # Left single quotation mark
+            '\u2019': "'",  # Right single quotation mark
+            '\u2013': '-',  # En dash
+            '\u2014': '-',  # Em dash
+            '\u2026': '...',  # Ellipsis
+            '\u2022': '*',  # Bullet
+        }
+        
+        result = text
+        for unicode_char, ascii_char in replacements.items():
+            result = result.replace(unicode_char, ascii_char)
+        
+        # Normalize any remaining non-ASCII characters using NFKD decomposition
+        # This converts accented characters to their base + combining marks
+        normalized = unicodedata.normalize('NFKD', result)
+        # Encode to ASCII (with 'ignore' to drop combining marks) then decode back
+        ascii_safe = normalized.encode('ascii', 'ignore').decode('ascii')
+        
+        return ascii_safe
 
     @classmethod
     def clean_and_validate(cls, raw_response: str, language: str = "C++") -> str:
@@ -92,7 +132,10 @@ class SolutionValidator:
         # 5. Basic structural sanity check
         cls._verify_structural_sanity(cleaned_code, language)
 
-        return cleaned_code
+        # 6. Normalize Unicode characters to prevent encoding errors in compilers
+        normalized_code = cls._normalize_unicode(cleaned_code)
+
+        return normalized_code
 
     @classmethod
     def _verify_structural_sanity(cls, code: str, language: str) -> None:

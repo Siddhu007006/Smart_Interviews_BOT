@@ -391,3 +391,94 @@ async def test_solve_problems_loop_advances_queue(mock_bot):
     assert stats["completed"] == 1
     assert stats["failed"] == 1
     assert bot.state_manager.state.session.workflow_state == WorkflowState.COMPLETE
+
+
+@pytest.mark.asyncio
+async def test_solve_problem_guarantees_five_attempts_on_failures(mock_bot):
+    """Verify that a problem is tried up to 5 times if early attempts evaluate as failed."""
+    bot, mock_page = mock_bot
+    problem_id = "alternate-seating"
+    bot.state_manager.state.problems_queue.append(problem_id)
+
+    with patch("src.hive.ProblemDetailParser.extract_from_page", new_callable=AsyncMock) as mock_extract, \
+         patch("src.editor.LanguageController.select_language", new_callable=AsyncMock) as mock_lang, \
+         patch("src.editor.EditorDetector.detect", new_callable=AsyncMock) as mock_detect:
+
+        mock_extract.return_value = make_dummy_problem_detail(problem_id)
+        mock_adapter = MagicMock(spec=EditorAdapter)
+        mock_adapter.is_ready = AsyncMock(return_value=True)
+        mock_adapter.set_code = AsyncMock()
+        mock_detect.return_value = mock_adapter
+
+        mock_engine = MagicMock(spec=AISolverEngine)
+        mock_engine.solve = AsyncMock(side_effect=[
+            SolutionResponse(code="code1", language="java", provider="groq", model="m", raw_response=""),
+            SolutionResponse(code="code2", language="java", provider="groq", model="m", raw_response=""),
+            SolutionResponse(code="code3", language="java", provider="groq", model="m", raw_response=""),
+            SolutionResponse(code="code4", language="java", provider="groq", model="m", raw_response=""),
+            SolutionResponse(code="code5", language="java", provider="groq", model="m", raw_response=""),
+        ])
+
+        mock_sub_mgr = MagicMock(spec=SubmissionManager)
+        mock_sub_mgr.submit_solution = AsyncMock(side_effect=[
+            SubmissionResult(success=False, verdict=Verdict.PARTIALLY_ACCEPTED, diagnostic_message="Score 10/20"),
+            SubmissionResult(success=False, verdict=Verdict.PARTIALLY_ACCEPTED, diagnostic_message="Score 14/20"),
+            SubmissionResult(success=False, verdict=Verdict.WRONG_ANSWER, diagnostic_message="Wrong answer"),
+            SubmissionResult(success=False, verdict=Verdict.PARTIALLY_ACCEPTED, diagnostic_message="Score 18/20"),
+            SubmissionResult(success=True, verdict=Verdict.ACCEPTED, diagnostic_message="All test cases passed"),
+        ])
+
+        success = await bot.solve_problem(
+            problem_id=problem_id,
+            solver_engine=mock_engine,
+            submission_manager=mock_sub_mgr
+        )
+
+        assert success is True
+        assert mock_engine.solve.call_count == 5
+        assert mock_sub_mgr.submit_solution.call_count == 5
+        assert problem_id in bot.state_manager.state.completed_problems
+        assert bot.state_manager.state.progress[problem_id].attempts == 5
+
+
+@pytest.mark.asyncio
+async def test_solve_problem_retries_ai_generation_on_transient_error(mock_bot):
+    """Verify that a transient error during AI generation does not abort solve_problem."""
+    bot, mock_page = mock_bot
+    problem_id = "test-ai-retry"
+    bot.state_manager.state.problems_queue.append(problem_id)
+
+    with patch("src.hive.ProblemDetailParser.extract_from_page", new_callable=AsyncMock) as mock_extract, \
+         patch("src.editor.LanguageController.select_language", new_callable=AsyncMock) as mock_lang, \
+         patch("src.editor.EditorDetector.detect", new_callable=AsyncMock) as mock_detect, \
+         patch("asyncio.sleep", new_callable=AsyncMock):
+
+        mock_extract.return_value = make_dummy_problem_detail(problem_id)
+        mock_adapter = MagicMock(spec=EditorAdapter)
+        mock_adapter.is_ready = AsyncMock(return_value=True)
+        mock_adapter.set_code = AsyncMock()
+        mock_detect.return_value = mock_adapter
+
+        mock_engine = MagicMock(spec=AISolverEngine)
+        # First call raises transient exception, second call succeeds
+        mock_engine.solve = AsyncMock(side_effect=[
+            Exception("Rate limit 429"),
+            SolutionResponse(code="valid_code", language="java", provider="groq", model="m", raw_response=""),
+        ])
+
+        mock_sub_mgr = MagicMock(spec=SubmissionManager)
+        mock_sub_mgr.submit_solution = AsyncMock(return_value=SubmissionResult(
+            success=True, verdict=Verdict.ACCEPTED, diagnostic_message="Accepted"
+        ))
+
+        success = await bot.solve_problem(
+            problem_id=problem_id,
+            solver_engine=mock_engine,
+            submission_manager=mock_sub_mgr
+        )
+
+        assert success is True
+        assert mock_engine.solve.call_count == 2
+        assert mock_sub_mgr.submit_solution.call_count == 1
+        assert problem_id in bot.state_manager.state.completed_problems
+
