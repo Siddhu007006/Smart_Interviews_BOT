@@ -877,10 +877,7 @@ class HiveBot:
                     # Inject code into editor with read-back verification
                     await editor_adapter.set_code(current_code)
 
-                    # Human-like delay: reviewing code (8-15 sec)
-                    review_delay = 8 + random.uniform(0, 7)
-                    logger.info(f"[Human timing] Code review: {review_delay:.1f}s")
-                    await asyncio.sleep(review_delay)
+
 
                     # Optional sample run
                     if run_sample_first:
@@ -1091,6 +1088,7 @@ class HiveBot:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.shutdown()
         return False
+
 
 
 
